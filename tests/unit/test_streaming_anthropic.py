@@ -1154,6 +1154,53 @@ class TestStreamingAnthropicContextUsage:
                     )
         print("✓ Request tools and system included in token count")
 
+    @pytest.mark.asyncio
+    async def test_context_usage_zero_keeps_fallback_estimate(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Keeps fallback estimate when context usage is 0.
+        Goal: Prevent overriding with zero prompt tokens.
+        """
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+            yield KiroEvent(type="context_usage", context_usage_percentage=0.0)
+
+        events = []
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 99}):
+                    async for event in stream_kiro_to_anthropic(
+                        mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                        request_messages=[{"role": "user", "content": "hi"}]
+                    ):
+                        events.append(event)
+
+        message_start_event = next(e for e in events if "event: message_start" in e)
+        assert '"input_tokens": 99' in message_start_event
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_passes_upstream_cache_usage_fields(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Passes through upstream cache usage fields when available.
+        Goal: Ensure no fake values, only real upstream usage keys.
+        """
+        mock_result = MagicMock(
+            content="done",
+            thinking_content="",
+            tool_calls=[],
+            context_usage_percentage=None,
+            usage={"cacheReadInputTokens": 12, "cacheCreationInputTokens": 34},
+        )
+
+        with patch('kiro.streaming_anthropic.collect_stream_to_result', return_value=mock_result):
+            with patch('kiro.streaming_anthropic.generate_message_id', return_value="msg_test"):
+                response_data = await collect_anthropic_response(
+                    mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager
+                )
+
+        usage = response_data["usage"]
+        assert usage["cache_read_input_tokens"] == 12
+        assert usage["cache_creation_input_tokens"] == 34
+
 
 # ==================================================================================================
 # Tests for generate_thinking_signature()

@@ -228,22 +228,24 @@ def count_tools_tokens(tools: Optional[List[Dict[str, Any]]], apply_claude_corre
     
     for tool in tools:
         total_tokens += 4  # Service tokens
-        
-        if tool.get("type") == "function":
-            func = tool.get("function", {})
-            
-            # Function name
-            total_tokens += count_tokens(func.get("name", ""), apply_claude_correction=False)
-            
-            # Function description
-            total_tokens += count_tokens(func.get("description", ""), apply_claude_correction=False)
-            
-            # Parameters (JSON schema)
-            params = func.get("parameters")
-            if params:
-                import json
-                params_str = json.dumps(params, ensure_ascii=False)
-                total_tokens += count_tokens(params_str, apply_claude_correction=False)
+
+        # 中文注释：兼容 OpenAI 标准工具与 Anthropic/OpenAI flat 工具
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            tool_payload = tool.get("function", {})
+        else:
+            tool_payload = tool
+
+        # Name / description
+        total_tokens += count_tokens(tool_payload.get("name", ""), apply_claude_correction=False)
+        total_tokens += count_tokens(tool_payload.get("description", ""), apply_claude_correction=False)
+
+        # JSON schema（Anthropic: input_schema, OpenAI: parameters）
+        params = tool_payload.get("input_schema")
+        if params is None:
+            params = tool_payload.get("parameters")
+        if params is not None:
+            params_str = json.dumps(params, ensure_ascii=False)
+            total_tokens += count_tokens(params_str, apply_claude_correction=False)
     
     # Apply correction to total count
     if apply_claude_correction:
