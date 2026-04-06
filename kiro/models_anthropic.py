@@ -297,10 +297,16 @@ class AnthropicUsage(BaseModel):
     Attributes:
         input_tokens: Number of input tokens
         output_tokens: Number of output tokens
+        cache_read_input_tokens: Tokens read from prompt cache (if provided by upstream)
+        cache_creation_input_tokens: Tokens used to create prompt cache (if provided)
     """
 
     input_tokens: int
     output_tokens: int
+    cache_read_input_tokens: Optional[int] = None
+    cache_creation_input_tokens: Optional[int] = None
+
+    model_config = {"extra": "allow"}
 
 
 class AnthropicMessagesResponse(BaseModel):

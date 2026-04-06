@@ -50,7 +50,6 @@ from kiro.streaming_anthropic import (
 )
 from kiro.http_client import KiroHttpClient
 from kiro.utils import generate_conversation_id
-from kiro.tokenizer import count_tools_tokens
 
 # Import debug_logger
 try:
@@ -368,7 +367,9 @@ async def messages(
                         request_data.model,
                         model_cache,
                         auth_manager,
-                        request_messages=messages_for_tokenizer
+                        request_messages=messages_for_tokenizer,
+                        request_tools=tools_for_tokenizer,
+                        request_system=request_data.system,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -415,7 +416,9 @@ async def messages(
                 request_data.model,
                 model_cache,
                 auth_manager,
-                request_messages=messages_for_tokenizer
+                request_messages=messages_for_tokenizer,
+                request_tools=tools_for_tokenizer,
+                request_system=request_data.system,
             )
             
             await http_client.close()

@@ -356,6 +356,41 @@ class TestCountMessageTokens:
         
         assert result > 0, "Сообщение с None content должно иметь служебные токены"
 
+    def test_anthropic_tool_use_and_tool_result_blocks(self):
+        """
+        Что он делает: Проверяет подсчёт Anthropic блоков tool_use/tool_result.
+        Цель: Убедиться, что ключевые блоки Claude Code не теряются в подсчёте.
+        """
+        print("Тест: Anthropic tool_use/tool_result блоки...")
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "get_weather",
+                        "input": {"city": "Tokyo"}
+                    }
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_123",
+                        "content": [{"type": "text", "text": "晴天 26C"}],
+                        "is_error": False
+                    }
+                ]
+            }
+        ]
+
+        result = count_message_tokens(messages, apply_claude_correction=False)
+        print(f"Результат: {result}")
+        assert result > 0
+
 
 class TestCountToolsTokens:
     """Тесты для функции count_tools_tokens."""
@@ -632,6 +667,24 @@ class TestEstimateRequestTokens:
         print(f"Результат: {result}")
         
         assert result["messages_tokens"] > 0
+        assert result["system_tokens"] > 0
+        assert result["total_tokens"] == result["messages_tokens"] + result["system_tokens"]
+
+    def test_anthropic_system_blocks(self):
+        """
+        Что он делает: Проверяет оценку токенов для Anthropic system block списка.
+        Цель: Убедиться, что system блоки тоже считаются.
+        """
+        print("Тест: Anthropic system blocks...")
+        messages = [{"role": "user", "content": "Hello!"}]
+        system_prompt = [
+            {"type": "text", "text": "你是 Claude Code"},
+            {"type": "text", "text": "Follow tools strictly", "cache_control": {"type": "ephemeral"}},
+        ]
+
+        result = estimate_request_tokens(messages, system_prompt=system_prompt, apply_claude_correction=False)
+        print(f"Результат: {result}")
+
         assert result["system_tokens"] > 0
         assert result["total_tokens"] == result["messages_tokens"] + result["system_tokens"]
     

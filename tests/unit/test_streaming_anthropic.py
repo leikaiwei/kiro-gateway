@@ -682,7 +682,7 @@ class TestCollectAnthropicResponse:
         print("Action: Collecting Anthropic response...")
         
         with patch('kiro.streaming_anthropic.collect_stream_to_result', return_value=mock_result):
-            with patch('kiro.streaming_anthropic.count_message_tokens', return_value=10):
+            with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 10}):
                 with patch('kiro.streaming_anthropic.count_tokens', return_value=5):
                     result = await collect_anthropic_response(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
@@ -1101,17 +1101,58 @@ class TestStreamingAnthropicContextUsage:
         
         with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
             with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
-                with patch('kiro.streaming_anthropic.count_message_tokens', return_value=10) as mock_count:
+                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 10}) as mock_estimate:
                     async for event in stream_kiro_to_anthropic(
                         mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
                         request_messages=request_messages
                     ):
                         events.append(event)
                     
-                    # Verify count_message_tokens was called
-                    mock_count.assert_called_once_with(request_messages, apply_claude_correction=False)
+                    # Verify estimate_request_tokens was called
+                    mock_estimate.assert_called_once_with(
+                        messages=request_messages,
+                        tools=None,
+                        system_prompt=None,
+                        apply_claude_correction=False
+                    )
         
         print("✓ Request messages used for input token count")
+
+    @pytest.mark.asyncio
+    async def test_uses_tools_and_system_for_input_tokens(self, mock_response, mock_model_cache, mock_auth_manager):
+        """
+        What it does: Includes request tools and system in input token estimation.
+        Goal: Verify Anthropic fallback token counting uses full request.
+        """
+        print("Setup: Mock stream...")
+
+        async def mock_parse_kiro_stream(*args, **kwargs):
+            yield KiroEvent(type="content", content="Hello")
+
+        request_messages = [{"role": "user", "content": "Hi"}]
+        request_tools = [{"name": "get_weather", "input_schema": {"type": "object"}}]
+        request_system = [{"type": "text", "text": "你是助手"}]
+
+        with patch('kiro.streaming_anthropic.parse_kiro_stream', mock_parse_kiro_stream):
+            with patch('kiro.streaming_anthropic.parse_bracket_tool_calls', return_value=[]):
+                with patch('kiro.streaming_anthropic.estimate_request_tokens', return_value={"total_tokens": 12}) as mock_estimate:
+                    events = []
+                    async for event in stream_kiro_to_anthropic(
+                        mock_response, "claude-sonnet-4", mock_model_cache, mock_auth_manager,
+                        request_messages=request_messages,
+                        request_tools=request_tools,
+                        request_system=request_system,
+                    ):
+                        events.append(event)
+
+                    assert events, "Should produce streaming events"
+                    mock_estimate.assert_called_once_with(
+                        messages=request_messages,
+                        tools=request_tools,
+                        system_prompt=request_system,
+                        apply_claude_correction=False
+                    )
+        print("✓ Request tools and system included in token count")
 
 
 # ==================================================================================================
