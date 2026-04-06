@@ -604,6 +604,61 @@ class TestCountToolsTokens:
         
         assert with_correction > without_correction, "С коррекцией должно быть больше"
 
+    def test_openai_flat_tool_format(self):
+        """
+        Что он делает: Проверяет подсчёт токенов для flat/Cursor-style инструмента.
+        Цель: Убедиться, что формат без type=function тоже учитывается.
+        """
+        tools = [
+            {
+                "name": "search_docs",
+                "description": "Search docs by keyword",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }
+        ]
+
+        result = count_tools_tokens(tools, apply_claude_correction=False)
+        assert result > 4  # 超过纯服务开销，说明 name/description/schema 被计入
+
+    def test_anthropic_flat_and_openai_function_are_close(self):
+        """
+        Что он делает: Сравнивает Anthropic flat и OpenAI function форматы.
+        Цель: 防止 Anthropic 工具再次退化到只算基础开销。
+        """
+        shared_schema = {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "recursive": {"type": "boolean", "description": "Recursive search"}
+            },
+            "required": ["path"]
+        }
+        openai_tools = [{
+            "type": "function",
+            "function": {
+                "name": "search_files",
+                "description": "Search files",
+                "parameters": shared_schema
+            }
+        }]
+        anthropic_tools = [{
+            "name": "search_files",
+            "description": "Search files",
+            "input_schema": shared_schema
+        }]
+
+        openai_tokens = count_tools_tokens(openai_tools, apply_claude_correction=False)
+        anthropic_tokens = count_tools_tokens(anthropic_tools, apply_claude_correction=False)
+
+        assert openai_tokens > 4
+        assert anthropic_tokens > 4
+        diff_ratio = abs(openai_tokens - anthropic_tokens) / max(openai_tokens, anthropic_tokens)
+        assert diff_ratio < 0.15
+
 
 class TestEstimateRequestTokens:
     """Тесты для функции estimate_request_tokens."""
@@ -719,6 +774,43 @@ class TestEstimateRequestTokens:
         
         expected_total = result["messages_tokens"] + result["tools_tokens"] + result["system_tokens"]
         assert result["total_tokens"] == expected_total, "Total должен быть суммой компонентов"
+
+    def test_anthropic_messages_with_flat_tools(self):
+        """
+        Что он делает: 模拟 Anthropic /v1/messages 的 tools+system 场景。
+        Цель: 验证 estimate_request_tokens 对 flat tools 不再低报。
+        """
+        messages = [
+            {"role": "user", "content": "请先读取项目结构，再回答。"}
+        ]
+        tools = [
+            {
+                "name": "read_file",
+                "description": "Read a file from workspace",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute path"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        ]
+        system_prompt = [{"type": "text", "text": "你是代码助手。"}]
+
+        result = estimate_request_tokens(
+            messages,
+            tools=tools,
+            system_prompt=system_prompt,
+            apply_claude_correction=False
+        )
+
+        assert result["messages_tokens"] > 0
+        assert result["tools_tokens"] > 4
+        assert result["system_tokens"] > 0
+        assert result["total_tokens"] == (
+            result["messages_tokens"] + result["tools_tokens"] + result["system_tokens"]
+        )
     
     def test_empty_messages(self):
         """

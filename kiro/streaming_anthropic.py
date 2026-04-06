@@ -98,6 +98,34 @@ def generate_thinking_signature() -> str:
     return f"sig_{uuid.uuid4().hex[:32]}"
 
 
+def _extract_cache_usage_fields(usage: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    从上游 usage 中提取缓存 token 字段（若存在）。
+
+    Args:
+        usage: Kiro 流事件中的 usage 数据
+
+    Returns:
+        仅包含可用缓存字段的字典，缺失字段不返回
+    """
+    if not isinstance(usage, dict):
+        return {}
+
+    extracted: Dict[str, int] = {}
+    key_map = {
+        "cache_read_input_tokens": "cache_read_input_tokens",
+        "cacheReadInputTokens": "cache_read_input_tokens",
+        "cache_creation_input_tokens": "cache_creation_input_tokens",
+        "cacheCreationInputTokens": "cache_creation_input_tokens",
+    }
+    for source_key, target_key in key_map.items():
+        value = usage.get(source_key)
+        if isinstance(value, (int, float)):
+            extracted[target_key] = int(value)
+
+    return extracted
+
+
 async def stream_kiro_to_anthropic(
     response: httpx.Response,
     model: str,
@@ -162,6 +190,7 @@ async def stream_kiro_to_anthropic(
     
     # Track context usage for token calculation
     context_usage_percentage: Optional[float] = None
+    upstream_cache_usage: Dict[str, int] = {}
     
     # Track truncated tool calls for recovery
     truncated_tools: List[Dict[str, Any]] = []
@@ -365,6 +394,8 @@ async def stream_kiro_to_anthropic(
             
             elif event.type == "context_usage" and event.context_usage_percentage is not None:
                 context_usage_percentage = event.context_usage_percentage
+            elif event.type == "usage" and event.usage:
+                upstream_cache_usage.update(_extract_cache_usage_fields(event.usage))
         
         # Track completion signals for truncation detection
         stream_completed_normally = context_usage_percentage is not None
@@ -469,24 +500,29 @@ async def stream_kiro_to_anthropic(
         
         # Calculate total tokens from context usage if available
         if context_usage_percentage is not None:
-            prompt_tokens, total_tokens, _, _ = calculate_tokens_from_context_usage(
+            prompt_tokens, _, prompt_source, _ = calculate_tokens_from_context_usage(
                 context_usage_percentage, output_tokens, model_cache, model
             )
-            input_tokens = prompt_tokens
+            # 中文注释：仅在上游上下文占用可用时覆盖本地估算，避免 0% 导致低报
+            if prompt_source != "unknown":
+                input_tokens = prompt_tokens
         
         # Determine stop reason
         stop_reason = "tool_use" if tool_blocks else "end_turn"
         
         # Send message_delta with stop_reason and usage
+        usage_payload = {
+            "output_tokens": output_tokens
+        }
+        usage_payload.update(upstream_cache_usage)
+
         yield format_sse_event("message_delta", {
             "type": "message_delta",
             "delta": {
                 "stop_reason": stop_reason,
                 "stop_sequence": None
             },
-            "usage": {
-                "output_tokens": output_tokens
-            }
+            "usage": usage_payload
         })
         
         # Send message_stop
@@ -591,6 +627,7 @@ async def collect_anthropic_response(
     
     # Collect stream result
     result = await collect_stream_to_result(response)
+    upstream_cache_usage = _extract_cache_usage_fields(result.usage)
     
     # Build content blocks
     content_blocks = []
@@ -639,10 +676,11 @@ async def collect_anthropic_response(
     
     # Calculate from context usage if available
     if result.context_usage_percentage is not None:
-        prompt_tokens, _, _, _ = calculate_tokens_from_context_usage(
+        prompt_tokens, _, prompt_source, _ = calculate_tokens_from_context_usage(
             result.context_usage_percentage, output_tokens, model_cache, model
         )
-        input_tokens = prompt_tokens
+        if prompt_source != "unknown":
+            input_tokens = prompt_tokens
     
     # Determine stop reason
     stop_reason = "tool_use" if result.tool_calls else "end_turn"
@@ -653,6 +691,12 @@ async def collect_anthropic_response(
         f"tool_calls={len(result.tool_calls)}, stop_reason={stop_reason}"
     )
     
+    usage_payload: Dict[str, Any] = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens
+    }
+    usage_payload.update(upstream_cache_usage)
+
     return {
         "id": message_id,
         "type": "message",
@@ -661,10 +705,7 @@ async def collect_anthropic_response(
         "model": model,
         "stop_reason": stop_reason,
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens
-        }
+        "usage": usage_payload
     }
 
 
