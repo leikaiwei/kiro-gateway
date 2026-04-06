@@ -47,7 +47,7 @@ from kiro.streaming_core import (
     calculate_tokens_from_context_usage,
     stream_with_first_token_retry,
 )
-from kiro.tokenizer import count_tokens, count_message_tokens, count_tools_tokens
+from kiro.tokenizer import count_tokens, estimate_request_tokens
 from kiro.parsers import parse_bracket_tool_calls, deduplicate_tool_calls
 from kiro.config import FIRST_TOKEN_TIMEOUT, FIRST_TOKEN_MAX_RETRIES, FAKE_REASONING_HANDLING
 
@@ -105,6 +105,8 @@ async def stream_kiro_to_anthropic(
     auth_manager: "KiroAuthManager",
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
+    request_tools: Optional[list] = None,
+    request_system: Optional[Any] = None,
     conversation_id: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """
@@ -120,6 +122,8 @@ async def stream_kiro_to_anthropic(
         auth_manager: Authentication manager
         first_token_timeout: First token wait timeout (seconds)
         request_messages: Original request messages (for token counting)
+        request_tools: Original request tools (for token counting)
+        request_system: Original system prompt (for token counting)
         conversation_id: Stable conversation ID for truncation recovery (optional)
     
     Yields:
@@ -134,9 +138,15 @@ async def stream_kiro_to_anthropic(
     full_content = ""
     full_thinking_content = ""
     
-    # Count input tokens from request messages
-    if request_messages:
-        input_tokens = count_message_tokens(request_messages, apply_claude_correction=False)
+    # 中文注释：fallback 估算需覆盖 messages/tools/system，避免明显低报
+    if request_messages or request_tools or request_system:
+        request_token_stats = estimate_request_tokens(
+            messages=request_messages or [],
+            tools=request_tools,
+            system_prompt=request_system,
+            apply_claude_correction=False
+        )
+        input_tokens = request_token_stats["total_tokens"]
     
     # Track content blocks - thinking block is index 0, text block is index 1 (when thinking enabled)
     current_block_index = 0
@@ -545,7 +555,9 @@ async def collect_anthropic_response(
     model: str,
     model_cache: "ModelInfoCache",
     auth_manager: "KiroAuthManager",
-    request_messages: Optional[list] = None
+    request_messages: Optional[list] = None,
+    request_tools: Optional[list] = None,
+    request_system: Optional[Any] = None
 ) -> dict:
     """
     Collect full response from Kiro stream in Anthropic format.
@@ -558,16 +570,24 @@ async def collect_anthropic_response(
         model_cache: Model cache
         auth_manager: Authentication manager
         request_messages: Original request messages (for token counting)
+        request_tools: Original request tools (for token counting)
+        request_system: Original system prompt (for token counting)
     
     Returns:
         Dictionary with full response in Anthropic Messages format
     """
     message_id = generate_message_id()
     
-    # Count input tokens
+    # 中文注释：非流式与流式保持一致，统一按完整请求估算
     input_tokens = 0
-    if request_messages:
-        input_tokens = count_message_tokens(request_messages, apply_claude_correction=False)
+    if request_messages or request_tools or request_system:
+        request_token_stats = estimate_request_tokens(
+            messages=request_messages or [],
+            tools=request_tools,
+            system_prompt=request_system,
+            apply_claude_correction=False
+        )
+        input_tokens = request_token_stats["total_tokens"]
     
     # Collect stream result
     result = await collect_stream_to_result(response)
@@ -656,7 +676,8 @@ async def stream_with_first_token_retry_anthropic(
     max_retries: int = FIRST_TOKEN_MAX_RETRIES,
     first_token_timeout: float = FIRST_TOKEN_TIMEOUT,
     request_messages: Optional[list] = None,
-    request_tools: Optional[list] = None
+    request_tools: Optional[list] = None,
+    request_system: Optional[Any] = None
 ) -> AsyncGenerator[str, None]:
     """
     Streaming with automatic retry on first token timeout for Anthropic API.
@@ -676,6 +697,7 @@ async def stream_with_first_token_retry_anthropic(
         first_token_timeout: First token wait timeout (seconds)
         request_messages: Original request messages (for fallback token counting)
         request_tools: Original request tools (for fallback token counting)
+        request_system: Original system prompt (for fallback token counting)
     
     Yields:
         Strings in Anthropic SSE format
@@ -711,7 +733,9 @@ async def stream_with_first_token_retry_anthropic(
             model_cache,
             auth_manager,
             first_token_timeout=first_token_timeout,
-            request_messages=request_messages
+            request_messages=request_messages,
+            request_tools=request_tools,
+            request_system=request_system,
         ):
             yield chunk
     

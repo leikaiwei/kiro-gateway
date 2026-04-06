@@ -739,6 +739,98 @@ class TestMessagesOptionalParams:
         
         print(f"Status: {response.status_code}")
         assert response.status_code != 422
+
+    def test_streaming_passes_tools_and_system_to_token_counter(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies routes pass tools/system to Anthropic streaming converter.
+        Purpose: Ensure input token fallback can count full request.
+        """
+        print("Action: POST /v1/messages streaming with tools+system...")
+
+        async def fake_stream_generator():
+            yield 'event: message_start\ndata: {"type":"message_start"}\n\n'
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        def fake_stream(*args, **kwargs):
+            return fake_stream_generator()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch('kiro.routes_anthropic.stream_kiro_to_anthropic', side_effect=fake_stream) as mock_stream, \
+             patch('kiro.http_client.KiroHttpClient.request_with_retry', return_value=mock_response):
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "system": [{"type": "text", "text": "你是 Claude Code"}],
+                    "tools": [
+                        {
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "input_schema": {"type": "object", "properties": {}}
+                        }
+                    ],
+                    "stream": True
+                }
+            )
+
+        assert response.status_code != 422
+        assert mock_stream.called
+        kwargs = mock_stream.call_args.kwargs
+        assert kwargs["request_tools"] is not None
+        assert kwargs["request_system"] is not None
+        print("✓ routes 已透传 tools/system 到 streaming")
+
+    def test_non_streaming_passes_tools_and_system_to_token_counter(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies routes pass tools/system to non-streaming collector.
+        Purpose: Ensure non-streaming usage fallback can count full request.
+        """
+        print("Action: POST /v1/messages non-streaming with tools+system...")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        with patch('kiro.routes_anthropic.collect_anthropic_response', new_callable=AsyncMock) as mock_collect, \
+             patch('kiro.http_client.KiroHttpClient.request_with_retry', return_value=mock_response):
+            mock_collect.return_value = {
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-5",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-sonnet-4-5",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "system": [{"type": "text", "text": "你是 Claude Code"}],
+                    "tools": [
+                        {
+                            "name": "get_weather",
+                            "description": "Get weather",
+                            "input_schema": {"type": "object", "properties": {}}
+                        }
+                    ],
+                    "stream": False
+                }
+            )
+
+        assert response.status_code == 200
+        kwargs = mock_collect.call_args.kwargs
+        assert kwargs["request_tools"] is not None
+        assert kwargs["request_system"] is not None
+        print("✓ routes 已透传 tools/system 到 non-streaming")
     
     def test_accepts_stop_sequences(self, test_client, valid_proxy_api_key):
         """

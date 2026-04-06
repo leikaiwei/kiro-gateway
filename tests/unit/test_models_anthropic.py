@@ -1226,6 +1226,25 @@ class TestAnthropicUsage:
         print(f"ValidationError raised: {exc_info.value}")
         assert "output_tokens" in str(exc_info.value)
 
+    def test_accepts_cache_fields_and_extra(self):
+        """
+        What it does: Verifies cache usage fields and extra fields are accepted.
+        Purpose: Ensure Anthropic usage model is forward-compatible.
+        """
+        print("Setup: Creating AnthropicUsage with cache fields and extra...")
+        usage = AnthropicUsage(
+            input_tokens=100,
+            output_tokens=50,
+            cache_read_input_tokens=20,
+            cache_creation_input_tokens=30,
+            upstream_extra_metric=7
+        )
+
+        print(f"Result: {usage}")
+        assert usage.cache_read_input_tokens == 20
+        assert usage.cache_creation_input_tokens == 30
+        assert usage.model_dump().get("upstream_extra_metric") == 7
+
 
 # ==================================================================================================
 # Tests for AnthropicMessagesResponse
