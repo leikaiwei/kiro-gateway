@@ -142,14 +142,14 @@ def count_message_tokens(messages: List[Dict[str, Any]], apply_claude_correction
             if isinstance(content, str):
                 total_tokens += count_tokens(content, apply_claude_correction=False)
             elif isinstance(content, list):
-                # 兼容 OpenAI/Anthropic 的多种 content block
+                # Support OpenAI/Anthropic multi-type content blocks
                 for item in content:
                     if isinstance(item, dict):
                         item_type = item.get("type")
                         if item_type == "text":
                             total_tokens += count_tokens(item.get("text", ""), apply_claude_correction=False)
                         elif item_type in {"image_url", "image"}:
-                            # 图片按固定成本估算，避免大幅漏算
+                            # Estimate image as fixed cost to avoid significant undercount
                             total_tokens += 100
                         elif item_type == "tool_use":
                             total_tokens += count_tokens(item.get("id", ""), apply_claude_correction=False)
@@ -180,7 +180,7 @@ def count_message_tokens(messages: List[Dict[str, Any]], apply_claude_correction
                             elif tool_result_content is not None:
                                 total_tokens += count_tokens(str(tool_result_content), apply_claude_correction=False)
                         else:
-                            # 未知 block 兜底：按 JSON 估算，确保不漏算
+                            # Unknown block fallback: estimate via JSON to avoid undercount
                             total_tokens += count_tokens(
                                 json.dumps(item, ensure_ascii=False),
                                 apply_claude_correction=False
@@ -229,7 +229,7 @@ def count_tools_tokens(tools: Optional[List[Dict[str, Any]]], apply_claude_corre
     for tool in tools:
         total_tokens += 4  # Service tokens
 
-        # 中文注释：兼容 OpenAI 标准工具与 Anthropic/OpenAI flat 工具
+        # Support both OpenAI standard tools and Anthropic/OpenAI flat tools
         if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
             tool_payload = tool.get("function", {})
         else:
@@ -276,7 +276,7 @@ def count_system_tokens(system_prompt: Optional[Any], apply_claude_correction: b
     elif isinstance(system_prompt, list):
         for block in system_prompt:
             if isinstance(block, dict):
-                # 中文注释：优先统计文本，兼容 prompt caching 结构
+                # Count text content, support prompt caching structure
                 total_tokens += count_tokens(block.get("type", ""), apply_claude_correction=False)
                 total_tokens += count_tokens(block.get("text", ""), apply_claude_correction=False)
                 if block.get("cache_control") is not None:

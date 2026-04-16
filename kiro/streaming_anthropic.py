@@ -100,13 +100,13 @@ def generate_thinking_signature() -> str:
 
 def _extract_cache_usage_fields(usage: Optional[Dict[str, Any]]) -> Dict[str, int]:
     """
-    从上游 usage 中提取缓存 token 字段（若存在）。
+    Extract cache token fields from upstream usage (if present).
 
     Args:
-        usage: Kiro 流事件中的 usage 数据
+        usage: Usage data from Kiro stream event
 
     Returns:
-        仅包含可用缓存字段的字典，缺失字段不返回
+        Dict containing only available cache fields; missing fields are omitted
     """
     if not isinstance(usage, dict):
         return {}
@@ -166,7 +166,7 @@ async def stream_kiro_to_anthropic(
     full_content = ""
     full_thinking_content = ""
     
-    # 中文注释：fallback 估算需覆盖 messages/tools/system，避免明显低报
+    # Fallback estimation must cover messages/tools/system to avoid significant undercount
     if request_messages or request_tools or request_system:
         request_token_stats = estimate_request_tokens(
             messages=request_messages or [],
@@ -503,7 +503,7 @@ async def stream_kiro_to_anthropic(
             prompt_tokens, _, prompt_source, _ = calculate_tokens_from_context_usage(
                 context_usage_percentage, output_tokens, model_cache, model
             )
-            # 中文注释：仅在上游上下文占用可用时覆盖本地估算，避免 0% 导致低报
+            # Only override local estimate when upstream context usage is available, avoid 0% zeroing out
             if prompt_source != "unknown":
                 input_tokens = prompt_tokens
         
@@ -614,7 +614,7 @@ async def collect_anthropic_response(
     """
     message_id = generate_message_id()
     
-    # 中文注释：非流式与流式保持一致，统一按完整请求估算
+    # Non-streaming uses the same full-request estimation as streaming
     input_tokens = 0
     if request_messages or request_tools or request_system:
         request_token_stats = estimate_request_tokens(

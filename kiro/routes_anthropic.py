@@ -301,6 +301,11 @@ async def messages(
     # Convert Pydantic models to dicts for tokenizer
     messages_for_tokenizer = [msg.model_dump() for msg in request_data.messages]
     tools_for_tokenizer = [tool.model_dump() for tool in request_data.tools] if request_data.tools else None
+    # Serialize system prompt (may be a list of Pydantic objects)
+    if isinstance(request_data.system, list):
+        system_for_tokenizer = [b.model_dump() if hasattr(b, "model_dump") else b for b in request_data.system]
+    else:
+        system_for_tokenizer = request_data.system
     
     try:
         # Make request to Kiro API (for both streaming and non-streaming modes)
@@ -369,7 +374,7 @@ async def messages(
                         auth_manager,
                         request_messages=messages_for_tokenizer,
                         request_tools=tools_for_tokenizer,
-                        request_system=request_data.system,
+                        request_system=system_for_tokenizer,
                     ):
                         yield chunk
                 except GeneratorExit:
@@ -418,7 +423,7 @@ async def messages(
                 auth_manager,
                 request_messages=messages_for_tokenizer,
                 request_tools=tools_for_tokenizer,
-                request_system=request_data.system,
+                request_system=system_for_tokenizer,
             )
             
             await http_client.close()

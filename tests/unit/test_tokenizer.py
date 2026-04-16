@@ -19,6 +19,7 @@ from kiro.tokenizer import (
     count_tokens,
     count_message_tokens,
     count_tools_tokens,
+    count_system_tokens,
     estimate_request_tokens,
     CLAUDE_CORRECTION_FACTOR,
     _get_encoding
@@ -622,12 +623,12 @@ class TestCountToolsTokens:
         ]
 
         result = count_tools_tokens(tools, apply_claude_correction=False)
-        assert result > 4  # 超过纯服务开销，说明 name/description/schema 被计入
+        assert result > 4  # Must exceed base service overhead, proving name/description/schema are counted
 
     def test_anthropic_flat_and_openai_function_are_close(self):
         """
         Что он делает: Сравнивает Anthropic flat и OpenAI function форматы.
-        Цель: 防止 Anthropic 工具再次退化到只算基础开销。
+        Цель: Prevent Anthropic tools from regressing to base-overhead-only counting.
         """
         shared_schema = {
             "type": "object",
@@ -658,6 +659,60 @@ class TestCountToolsTokens:
         assert anthropic_tokens > 4
         diff_ratio = abs(openai_tokens - anthropic_tokens) / max(openai_tokens, anthropic_tokens)
         assert diff_ratio < 0.15
+
+
+class TestCountSystemTokens:
+    """Tests for count_system_tokens function."""
+
+    def test_none_returns_zero(self):
+        """Checks that None returns 0."""
+        assert count_system_tokens(None) == 0
+
+    def test_empty_string_returns_zero(self):
+        """Checks that empty string returns 0."""
+        assert count_system_tokens("") == 0
+
+    def test_plain_string(self):
+        """Checks that plain string is counted correctly."""
+        result = count_system_tokens("You are a helpful assistant.", apply_claude_correction=False)
+        assert result > 0
+
+    def test_dict_block_list(self):
+        """Checks that Anthropic dict block list is counted correctly."""
+        blocks = [
+            {"type": "text", "text": "You are a helpful assistant."},
+            {"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral"}},
+        ]
+        result = count_system_tokens(blocks, apply_claude_correction=False)
+        assert result > 0
+        # Should be greater than single block result
+        single = count_system_tokens([blocks[0]], apply_claude_correction=False)
+        assert result > single
+
+    def test_dict_block_with_cache_control(self):
+        """Checks that cache_control field is counted in tokens."""
+        without_cache = [{"type": "text", "text": "Hello"}]
+        with_cache = [{"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}}]
+        r1 = count_system_tokens(without_cache, apply_claude_correction=False)
+        r2 = count_system_tokens(with_cache, apply_claude_correction=False)
+        assert r2 > r1
+
+    def test_non_dict_block_fallback(self):
+        """Checks that non-dict elements fall back to str()."""
+        result = count_system_tokens([42, "text"], apply_claude_correction=False)
+        assert result > 0
+
+    def test_unknown_type_fallback(self):
+        """Checks that non-str/list types fall back to str()."""
+        result = count_system_tokens(12345, apply_claude_correction=False)
+        assert result > 0
+
+    def test_claude_correction_applied(self):
+        """Checks that Claude correction coefficient is applied."""
+        text = "You are a helpful assistant that answers questions about programming and software engineering."
+        without = count_system_tokens(text, apply_claude_correction=False)
+        with_corr = count_system_tokens(text, apply_claude_correction=True)
+        assert with_corr > without
 
 
 class TestEstimateRequestTokens:
@@ -777,8 +832,8 @@ class TestEstimateRequestTokens:
 
     def test_anthropic_messages_with_flat_tools(self):
         """
-        Что он делает: 模拟 Anthropic /v1/messages 的 tools+system 场景。
-        Цель: 验证 estimate_request_tokens 对 flat tools 不再低报。
+        Что он делает: Simulates Anthropic /v1/messages with tools+system scenario.
+        Цель: Verify estimate_request_tokens no longer undercounts flat tools.
         """
         messages = [
             {"role": "user", "content": "请先读取项目结构，再回答。"}
