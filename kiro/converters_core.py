@@ -40,7 +40,10 @@ from kiro.config import (
     TOOL_DESCRIPTION_MAX_LENGTH,
     FAKE_REASONING_ENABLED,
     FAKE_REASONING_MAX_TOKENS,
+    KIRO_MAX_PAYLOAD_BYTES,
+    AUTO_TRIM_PAYLOAD,
 )
+from kiro.payload_guards import check_payload_size, trim_payload_to_limit
 
 
 # ==================================================================================================
@@ -133,8 +136,8 @@ def extract_text_content(content: Any) -> str:
         text_parts = []
         for item in content:
             if isinstance(item, dict):
-                # Skip image blocks - they're handled separately
-                if item.get("type") in ("image", "image_url"):
+                # Skip image and tool_reference blocks - they're handled separately
+                if item.get("type") in ("image", "image_url", "tool_reference"):
                     continue
                 if item.get("type") == "text":
                     text_parts.append(item.get("text", ""))
@@ -1518,5 +1521,15 @@ def build_kiro_payload(
     # Add profileArn
     if profile_arn:
         payload["profileArn"] = profile_arn
-    
+
+    # Payload size guard — auto-trim if enabled
+    if AUTO_TRIM_PAYLOAD:
+        payload_size = check_payload_size(payload)
+        if payload_size > KIRO_MAX_PAYLOAD_BYTES:
+            stats = trim_payload_to_limit(payload, KIRO_MAX_PAYLOAD_BYTES)
+            logger.info(
+                f"Trimmed conversation history: {stats.original_entries} -> {stats.final_entries} messages "
+                f"({stats.original_bytes} -> {stats.final_bytes} bytes)"
+            )
+
     return KiroPayloadResult(payload=payload, tool_documentation=tool_documentation)
