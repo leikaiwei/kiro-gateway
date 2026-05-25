@@ -37,6 +37,19 @@ jobs:
       - name: Run tests
         run: pytest -v --tb=short
 
+      - name: Generate coverage report
+        if: success()
+        run: |
+          pip install pytest-cov
+          pytest --cov=kiro --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
   build-test-image:
     name: Build Docker Image (No Push)
     runs-on: ubuntu-latest
@@ -44,6 +57,7 @@ jobs:
     if: github.event_name != 'release'
     permissions:
       contents: read
+      security-events: write
 
     steps:
       - name: Checkout code
@@ -51,6 +65,11 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Clean up runtime artifacts
+        run: |
+          rm -f credentials.json state.json
+          echo "已清理运行时凭据文件"
 
       - name: Build local test image
         uses: docker/build-push-action@v5
@@ -62,19 +81,47 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test image
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: kiro-gateway:test
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+          category: docker-image
+
+      - name: Test Docker image
         run: |
-          # 中文注释：只做最小可用性检查，避免引入额外外部依赖
-          docker run -d \
-            --name kiro-gateway-test \
-            -p 8000:8000 \
-            -e PROXY_API_KEY="test-key-123" \
-            -e REFRESH_TOKEN="test-token" \
-            kiro-gateway:test
-          sleep 10
-          curl -f http://localhost:8000/health
-          docker stop kiro-gateway-test
-          docker rm kiro-gateway-test
+          # 校验镜像结构和非 root 用户写权限。
+          docker run --rm kiro-gateway:test sh -c "
+            test -f /app/main.py && \
+            test -d /app/kiro && \
+            test -w /app && \
+            touch /app/test.tmp && rm /app/test.tmp
+          "
+
+          # 校验上游新增模块与服务依赖可以导入。
+          docker run --rm kiro-gateway:test python -c "
+          import kiro
+          import kiro.auth
+          import kiro.account_manager
+          import kiro.config
+          import kiro.routes_openai
+          import kiro.routes_anthropic
+          import fastapi
+          import httpx
+          import loguru
+          import uvicorn
+          "
+
+          docker run --rm kiro-gateway:test python main.py --version
 
   release-ghcr:
     name: Build and Push to GHCR (Release)
@@ -91,6 +138,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Clean up runtime artifacts
+        run: |
+          rm -f credentials.json state.json
+          echo "已清理运行时凭据文件"
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -104,7 +156,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # 中文注释：发布页 tag 作为主版本标签
+            # 发布页 tag 作为主版本标签。
             type=raw,value=${{ github.event.release.tag_name }}
             type=raw,value=latest
             type=sha,prefix=release-

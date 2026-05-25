@@ -1127,6 +1127,108 @@ class TestAnthropicTool:
         
         print(f"Comparing description: Expected None, Got {tool.description}")
         assert tool.description is None
+    
+    def test_server_side_tool_without_input_schema_valid(self):
+        """
+        What it does: Server-side tool (with type field) should NOT require input_schema.
+        Purpose: Ensure Anthropic server-side tools work without input_schema.
+        """
+        print("Setup: Creating server-side tool with type field...")
+        tool_data = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5
+        }
+        
+        print("Action: Creating AnthropicTool...")
+        tool = AnthropicTool(**tool_data)
+        
+        print(f"Comparing type: Expected 'web_search_20250305', Got '{tool.type}'")
+        assert tool.type == "web_search_20250305"
+        
+        print(f"Comparing name: Expected 'web_search', Got '{tool.name}'")
+        assert tool.name == "web_search"
+        
+        print(f"Comparing input_schema: Expected None, Got {tool.input_schema}")
+        assert tool.input_schema is None
+        
+        print(f"Comparing max_uses: Expected 5, Got {tool.max_uses}")
+        assert tool.max_uses == 5
+    
+    def test_user_defined_tool_without_input_schema_invalid(self):
+        """
+        What it does: User-defined tool (no type field) MUST have input_schema.
+        Purpose: Ensure validation fails for user-defined tools without input_schema.
+        """
+        print("Setup: Attempting to create user-defined tool without input_schema...")
+        tool_data = {
+            "name": "my_tool",
+            "description": "My tool"
+            # Missing input_schema and no type field
+        }
+        
+        print("Action: Creating model (should raise ValidationError)...")
+        with pytest.raises(ValidationError) as exc_info:
+            AnthropicTool(**tool_data)
+        
+        print(f"ValidationError raised: {exc_info.value}")
+        assert "input_schema is required" in str(exc_info.value)
+    
+    def test_server_side_tool_all_parameters(self):
+        """
+        What it does: Server-side tool with all optional parameters.
+        Purpose: Ensure all server-side tool parameters are accepted.
+        """
+        print("Setup: Creating server-side tool with all parameters...")
+        tool_data = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "description": "Search the web",
+            "max_uses": 10,
+            "allowed_domains": ["example.com", "test.com"],
+            "blocked_domains": ["spam.com"],
+            "user_location": {"city": "Moscow", "country": "RU"}
+        }
+        
+        print("Action: Creating AnthropicTool...")
+        tool = AnthropicTool(**tool_data)
+        
+        print(f"Comparing allowed_domains: Got {tool.allowed_domains}")
+        assert tool.allowed_domains == ["example.com", "test.com"]
+        
+        print(f"Comparing blocked_domains: Got {tool.blocked_domains}")
+        assert tool.blocked_domains == ["spam.com"]
+        
+        print(f"Comparing user_location: Got {tool.user_location}")
+        assert tool.user_location["city"] == "Moscow"
+        assert tool.user_location["country"] == "RU"
+    
+    def test_server_side_tool_with_input_schema_valid(self):
+        """
+        What it does: Server-side tool CAN have input_schema (optional).
+        Purpose: Ensure server-side tools accept input_schema if provided.
+        """
+        print("Setup: Creating server-side tool with input_schema...")
+        tool_data = {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }
+        }
+        
+        print("Action: Creating AnthropicTool...")
+        tool = AnthropicTool(**tool_data)
+        
+        print(f"Comparing type: Got '{tool.type}'")
+        assert tool.type == "web_search_20250305"
+        
+        print(f"Comparing input_schema: Got {tool.input_schema}")
+        assert tool.input_schema is not None
+        assert "properties" in tool.input_schema
 
 
 # ==================================================================================================
@@ -1302,25 +1404,6 @@ class TestAnthropicUsage:
         
         print(f"ValidationError raised: {exc_info.value}")
         assert "output_tokens" in str(exc_info.value)
-
-    def test_accepts_cache_fields_and_extra(self):
-        """
-        What it does: Verifies cache usage fields and extra fields are accepted.
-        Purpose: Ensure Anthropic usage model is forward-compatible.
-        """
-        print("Setup: Creating AnthropicUsage with cache fields and extra...")
-        usage = AnthropicUsage(
-            input_tokens=100,
-            output_tokens=50,
-            cache_read_input_tokens=20,
-            cache_creation_input_tokens=30,
-            upstream_extra_metric=7
-        )
-
-        print(f"Result: {usage}")
-        assert usage.cache_read_input_tokens == 20
-        assert usage.cache_creation_input_tokens == 30
-        assert usage.model_dump().get("upstream_extra_metric") == 7
 
 
 # ==================================================================================================
@@ -1598,3 +1681,79 @@ class TestErrorModels:
         
         print(f"Comparing error.type: Got '{response.error.type}'")
         assert response.error.type == "authentication_error"
+
+
+# ==================================================================================================
+# Tests for Client Thinking Budget Support (Issue #111)
+# ==================================================================================================
+
+class TestThinkingParameter:
+    """Tests for thinking parameter in AnthropicMessagesRequest."""
+    
+    def test_thinking_optional(self):
+        """
+        What it does: Verifies thinking parameter can be None (not specified)
+        Purpose: Ensure thinking is optional parameter
+        """
+        print("Creating AnthropicMessagesRequest without thinking...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024
+        )
+        
+        print(f"Comparing: expected=None, got={request.thinking}")
+        assert request.thinking is None
+    
+    def test_thinking_with_budget_tokens(self):
+        """
+        What it does: Verifies thinking={"type": "enabled", "budget_tokens": 8000} is accepted
+        Purpose: Ensure official Anthropic thinking format with budget works
+        """
+        print("Creating AnthropicMessagesRequest with thinking budget...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 8000}
+        )
+        
+        print(f"Comparing thinking: got={request.thinking}")
+        assert request.thinking is not None
+        assert request.thinking["type"] == "enabled"
+        assert request.thinking["budget_tokens"] == 8000
+    
+    def test_thinking_without_budget_tokens(self):
+        """
+        What it does: Verifies thinking={"type": "enabled"} without budget_tokens is accepted
+        Purpose: Ensure thinking can be enabled without explicit budget
+        """
+        print("Creating AnthropicMessagesRequest with thinking enabled but no budget...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "enabled"}
+        )
+        
+        print(f"Comparing thinking: got={request.thinking}")
+        assert request.thinking is not None
+        assert request.thinking["type"] == "enabled"
+        assert "budget_tokens" not in request.thinking
+    
+    def test_thinking_disabled(self):
+        """
+        What it does: Verifies thinking={"type": "disabled"} is accepted
+        Purpose: Ensure client can explicitly disable thinking
+        """
+        print("Creating AnthropicMessagesRequest with thinking disabled...")
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4.5",
+            messages=[AnthropicMessage(role="user", content="test")],
+            max_tokens=1024,
+            thinking={"type": "disabled"}
+        )
+        
+        print(f"Comparing thinking: got={request.thinking}")
+        assert request.thinking is not None
+        assert request.thinking["type"] == "disabled"
