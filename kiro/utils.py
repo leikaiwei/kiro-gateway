@@ -78,8 +78,7 @@ def get_kiro_headers(auth_manager: "KiroAuthManager", token: str) -> dict:
     
     return {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/x-amz-json-1.0",
-        "x-amz-target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+        "Content-Type": "application/json",
         "User-Agent": f"aws-sdk-js/1.0.27 ua/2.1 os/win32#10.0.19044 lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-0.7.45-{fingerprint}",
         "x-amz-user-agent": f"aws-sdk-js/1.0.27 KiroIDE-0.7.45-{fingerprint}",
         "x-amzn-codewhisperer-optout": "true",
