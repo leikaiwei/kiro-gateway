@@ -14,6 +14,24 @@
 - Pull Request 和 `main` 分支推送仅运行验证，不推送镜像。
 - 仅在 GitHub Release 发布时向 GHCR 推送 `linux/amd64` 与 `linux/arm64` 镜像。
 
+## 临时合并的上游 PR
+
+> 以下 PR 尚未被上游 `main` 合入，为支持 Claude Opus 4.8 临时 cherry-pick 到本 fork。**待上游合入后应还原这些提交，改为同步上游 main。**
+
+### fix(models): 接受 inline system role（[PR #195](https://github.com/jwadow/kiro-gateway/pull/195)）
+
+Claude Code 使用 Opus 4.8 时会发送 inline `system` 消息，原有 `AnthropicMessage.role` 仅接受 `user`/`assistant`，导致 422 错误。扩展为接受 `system` 并由 `normalize_message_roles` 下游处理。
+
+### fix(model_resolver): 解析 MODEL_ALIASES（[PR #184](https://github.com/jwadow/kiro-gateway/pull/184)）
+
+`get_model_id_for_kiro()` 未先检查 aliases 就直接 normalize，导致自定义别名（如 Cursor IDE 用户需要的自定义模型名）无法正确路由到 Kiro API。
+
+### feat(thinking): 支持原生 adaptive reasoning（[PR #192](https://github.com/jwadow/kiro-gateway/pull/192)）
+
+添加 `KIRO_NATIVE_THINKING_MODE` 环境变量（off/auto/force），支持 Opus 4.8 的原生 adaptive thinking。解析 `reasoningContentEvent` 帧，通过 OpenAI/Anthropic 响应路径输出 reasoning 内容。
+
+---
+
 ## 已合并至上游的历史补丁
 
 > 以下补丁已于 2026-04-18 通过上游 [PR #135](https://github.com/jwadow/kiro-gateway/pull/135) 合并。为便于追溯保留记录，但不再作为 fork 专属差异维护。
