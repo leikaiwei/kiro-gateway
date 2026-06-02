@@ -8,6 +8,16 @@
 
 ## Fork 差异
 
+### Endpoint 兼容性
+
+上游将 API endpoint 从 `q.{region}.amazonaws.com` 迁移至 `runtime.{region}.kiro.dev`，但新 endpoint 对 SSO OIDC 账号返回 403。本 fork 还原了 `Content-Type` header 和 `profileArn` 处理逻辑，并支持通过环境变量覆盖 endpoint：
+
+```yaml
+environment:
+  KIRO_API_HOST_TEMPLATE: "https://q.{region}.amazonaws.com"
+  KIRO_Q_HOST_TEMPLATE: "https://q.{region}.amazonaws.com"
+```
+
 ### CI / 镜像发布策略
 
 - `.github/workflows/docker.yml` 拆分为测试、Docker 镜像验证与 release 发布三个阶段。
