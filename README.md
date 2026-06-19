@@ -18,6 +18,15 @@ environment:
   KIRO_Q_HOST_TEMPLATE: "https://q.{region}.amazonaws.com"
 ```
 
+### 首个 token 超时默认值
+
+扩展思考模型（Opus 4.7 / 4.8）在产出首个 token 前可能思考 30–120 秒，上游默认的 `FIRST_TOKEN_TIMEOUT=15` 会过早触发重试，导致请求被反复取消。本 fork 将默认值提升至 120 秒。非思考模型如需更快重试，可通过环境变量下调：
+
+```yaml
+environment:
+  FIRST_TOKEN_TIMEOUT: "30"
+```
+
 ### CI / 镜像发布策略
 
 - `.github/workflows/docker.yml` 拆分为测试、Docker 镜像验证与 release 发布三个阶段。

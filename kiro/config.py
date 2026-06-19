@@ -350,9 +350,12 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 # Timeout for waiting for the first token from the model (in seconds).
 # If the model doesn't respond within this time, the request will be cancelled and retried.
 # This helps handle "stuck" requests when the model takes too long to think.
-# Default: 30 seconds (recommended for production)
-# Set a lower value (e.g., 10-15) for more aggressive retry.
-FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "15"))
+#
+# NOTE: Extended thinking models (Opus 4.8/4.7) may need 30-120+ seconds before
+# producing the first token. Set this high enough to avoid premature retries.
+# Default: 120 seconds (covers extended thinking scenarios)
+# Set a lower value (e.g., 15-30) for faster retry on non-thinking models.
+FIRST_TOKEN_TIMEOUT: float = float(os.getenv("FIRST_TOKEN_TIMEOUT", "120"))
 
 # Read timeout for streaming responses (in seconds).
 # This is the maximum time to wait for data between chunks during streaming.
