@@ -4,6 +4,12 @@
 credentials.json
 state.json
 
+# macOS
+.DS_Store
+
+# Playwright MCP（调试时生成）
+.playwright-mcp/
+
 # Local Docker Compose overrides
 docker-compose.yaml
 docker-compose.local.yml
