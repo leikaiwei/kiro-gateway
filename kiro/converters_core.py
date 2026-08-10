@@ -1615,8 +1615,13 @@ def build_kiro_payload(
     if tool_documentation:
         full_system_prompt = full_system_prompt + tool_documentation if full_system_prompt else tool_documentation.strip()
     
-    # Add thinking mode legitimization to system prompt if enabled
-    thinking_system_addition = get_thinking_system_prompt_addition()
+    # Add thinking mode legitimization to system prompt if enabled.
+    # Only when fake tags are actually injected below: with native thinking active
+    # (or thinking turned off by the client) this text would tell the model to wrap
+    # its reasoning in <thinking> tags that nothing injects or parses.
+    thinking_system_addition = (
+        get_thinking_system_prompt_addition() if thinking_config.enabled else ""
+    )
     if thinking_system_addition:
         full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
     
