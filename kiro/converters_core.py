@@ -108,7 +108,11 @@ REASONING_EFFORT_BUDGET_RATIOS: Dict[str, float] = {
 }
 
 
+# Matched as a substring against the normalized model id, so "claude-opus-5"
+# also covers future minor revisions such as "claude-opus-5.1".
 NATIVE_THINKING_SUPPORTED_MODELS = (
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-opus-4.8",
     "claude-opus-4.7",
     "claude-opus-4.6",
@@ -181,18 +185,27 @@ def normalize_native_thinking_effort(effort: Optional[str]) -> Optional[str]:
     return None
 
 
-def build_native_thinking_config(model_id: str, effort: Optional[str]) -> NativeThinkingConfig:
+def build_native_thinking_config(
+    model_id: str, effort: Optional[str], client_disabled: bool = False
+) -> NativeThinkingConfig:
     """
     Build native adaptive thinking configuration from model and client effort.
 
     Args:
         model_id: Internal Kiro model ID.
         effort: Client effort level.
+        client_disabled: True when the client explicitly turned thinking off.
 
     Returns:
         NativeThinkingConfig for payload construction.
     """
     if KIRO_NATIVE_THINKING_MODE == "off":
+        return NativeThinkingConfig(enabled=False)
+
+    # An explicit opt-out always wins, including in "force" mode: otherwise
+    # thinking={"type": "disabled"} would reach here with effort=None and get
+    # silently upgraded to "high" below.
+    if client_disabled:
         return NativeThinkingConfig(enabled=False)
 
     if not supports_native_adaptive_thinking(model_id):
@@ -1615,8 +1628,13 @@ def build_kiro_payload(
     if tool_documentation:
         full_system_prompt = full_system_prompt + tool_documentation if full_system_prompt else tool_documentation.strip()
     
-    # Add thinking mode legitimization to system prompt if enabled
-    thinking_system_addition = get_thinking_system_prompt_addition()
+    # Add thinking mode legitimization to system prompt if enabled.
+    # Only when fake tags are actually injected below: with native thinking active
+    # (or thinking turned off by the client) this text would tell the model to wrap
+    # its reasoning in <thinking> tags that nothing injects or parses.
+    thinking_system_addition = (
+        get_thinking_system_prompt_addition() if thinking_config.enabled else ""
+    )
     if thinking_system_addition:
         full_system_prompt = full_system_prompt + thinking_system_addition if full_system_prompt else thinking_system_addition.strip()
     

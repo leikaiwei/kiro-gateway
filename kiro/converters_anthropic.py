@@ -504,7 +504,9 @@ def anthropic_to_kiro(
     if isinstance(request.thinking, dict) and request.thinking.get("type") == "adaptive":
         native_effort = request.thinking.get("effort") or "high"
         native_display = request.thinking.get("display")
-    native_thinking_config = build_native_thinking_config(model_id, native_effort)
+    native_thinking_config = build_native_thinking_config(
+        model_id, native_effort, client_disabled=not thinking_config.enabled
+    )
     if native_display in ("summarized", "omitted"):
         native_thinking_config.display = native_display
     if native_thinking_config.enabled:

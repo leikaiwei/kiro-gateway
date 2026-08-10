@@ -1994,3 +1994,92 @@ class TestAnthropicToKiroIntegration:
         content = user_input["content"]
         assert not content.startswith("<thinking_mode>enabled</thinking_mode>")
         assert not content.startswith("<max_thinking_length>")
+
+    @pytest.mark.parametrize("model_id", ["claude-opus-5", "claude-sonnet-5"])
+    def test_native_adaptive_thinking_supports_claude_5_models(self, monkeypatch, model_id):
+        """
+        What it does: Verifies Claude 5 models reach the native adaptive thinking path.
+        Purpose: Kiro exposes no native thinking channel for models outside
+            NATIVE_THINKING_SUPPORTED_MODELS, so Claude 5 would otherwise fall back to
+            fake reasoning, where thinking tokens are generated as ordinary output.
+        """
+        print(f"Enabling native thinking auto mode for {model_id}...")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_MODE", "auto")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_DISPLAY", "summarized")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        request = AnthropicMessagesRequest(
+            model=model_id,
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "adaptive", "effort": "high"},
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value=model_id):
+            payload = anthropic_to_kiro(request, "test-conv-c5", "arn:aws:test")
+
+        print("Checking native thinking fields...")
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "high"}
+
+        print("Checking fake thinking tags were not injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" not in content
+
+    def test_force_mode_respects_explicit_thinking_disabled(self, monkeypatch):
+        """
+        What it does: Verifies thinking={"type": "disabled"} is honored in force mode.
+        Purpose: A client opt-out must never be upgraded to "high". An explicit opt-out
+            arrives with effort=None, the same shape as "client said nothing", which is
+            exactly what force mode overrides.
+        """
+        print("Enabling native thinking force mode...")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_MODE", "force")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "disabled"},
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-opus-5"):
+            payload = anthropic_to_kiro(request, "test-conv-off", "arn:aws:test")
+
+        print("Checking neither kind of thinking was applied...")
+        assert "thinking" not in payload
+        assert "output_config" not in payload
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" not in content
+
+    def test_force_mode_enables_native_thinking_for_budget_tokens_clients(self, monkeypatch):
+        """
+        What it does: Verifies force mode routes budget_tokens requests to native thinking.
+        Purpose: Claude Code sends thinking={"type": "enabled", "budget_tokens": N}, which
+            maps to effort=None and falls back to fake reasoning under "auto". Only force
+            mode moves that traffic to the native path, so this is the production case.
+        """
+        print("Enabling native thinking force mode...")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_MODE", "force")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_DISPLAY", "summarized")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        request = AnthropicMessagesRequest(
+            model="claude-opus-5",
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "enabled", "budget_tokens": 48000},
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value="claude-opus-5"):
+            payload = anthropic_to_kiro(request, "test-conv-force", "arn:aws:test")
+
+        print("Checking native thinking took over with the default force effort...")
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "high"}
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" not in content
