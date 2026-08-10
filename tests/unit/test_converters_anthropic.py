@@ -1994,3 +1994,35 @@ class TestAnthropicToKiroIntegration:
         content = user_input["content"]
         assert not content.startswith("<thinking_mode>enabled</thinking_mode>")
         assert not content.startswith("<max_thinking_length>")
+
+    @pytest.mark.parametrize("model_id", ["claude-opus-5", "claude-sonnet-5"])
+    def test_native_adaptive_thinking_supports_claude_5_models(self, monkeypatch, model_id):
+        """
+        What it does: Verifies Claude 5 models reach the native adaptive thinking path.
+        Purpose: Kiro exposes no native thinking channel for models outside
+            NATIVE_THINKING_SUPPORTED_MODELS, so Claude 5 would otherwise fall back to
+            fake reasoning, where thinking tokens are generated as ordinary output.
+        """
+        print(f"Enabling native thinking auto mode for {model_id}...")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_MODE", "auto")
+        monkeypatch.setattr("kiro.converters_core.KIRO_NATIVE_THINKING_DISPLAY", "summarized")
+        monkeypatch.setattr("kiro.converters_core.FAKE_REASONING_ENABLED", True)
+
+        request = AnthropicMessagesRequest(
+            model=model_id,
+            messages=[AnthropicMessage(role="user", content="Test message")],
+            max_tokens=1024,
+            thinking={"type": "adaptive", "effort": "high"},
+        )
+
+        print("Calling anthropic_to_kiro...")
+        with patch("kiro.converters_anthropic.get_model_id_for_kiro", return_value=model_id):
+            payload = anthropic_to_kiro(request, "test-conv-c5", "arn:aws:test")
+
+        print("Checking native thinking fields...")
+        assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert payload["output_config"] == {"effort": "high"}
+
+        print("Checking fake thinking tags were not injected...")
+        content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+        assert "<thinking_mode>enabled</thinking_mode>" not in content

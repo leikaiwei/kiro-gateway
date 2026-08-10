@@ -108,7 +108,11 @@ REASONING_EFFORT_BUDGET_RATIOS: Dict[str, float] = {
 }
 
 
+# Matched as a substring against the normalized model id, so "claude-opus-5"
+# also covers future minor revisions such as "claude-opus-5.1".
 NATIVE_THINKING_SUPPORTED_MODELS = (
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-opus-4.8",
     "claude-opus-4.7",
     "claude-opus-4.6",
