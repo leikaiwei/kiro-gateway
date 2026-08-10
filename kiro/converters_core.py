@@ -185,18 +185,27 @@ def normalize_native_thinking_effort(effort: Optional[str]) -> Optional[str]:
     return None
 
 
-def build_native_thinking_config(model_id: str, effort: Optional[str]) -> NativeThinkingConfig:
+def build_native_thinking_config(
+    model_id: str, effort: Optional[str], client_disabled: bool = False
+) -> NativeThinkingConfig:
     """
     Build native adaptive thinking configuration from model and client effort.
 
     Args:
         model_id: Internal Kiro model ID.
         effort: Client effort level.
+        client_disabled: True when the client explicitly turned thinking off.
 
     Returns:
         NativeThinkingConfig for payload construction.
     """
     if KIRO_NATIVE_THINKING_MODE == "off":
+        return NativeThinkingConfig(enabled=False)
+
+    # An explicit opt-out always wins, including in "force" mode: otherwise
+    # thinking={"type": "disabled"} would reach here with effort=None and get
+    # silently upgraded to "high" below.
+    if client_disabled:
         return NativeThinkingConfig(enabled=False)
 
     if not supports_native_adaptive_thinking(model_id):

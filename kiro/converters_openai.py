@@ -395,7 +395,9 @@ def build_kiro_payload(
     
     # Extract thinking configuration from reasoning_effort
     thinking_config = extract_thinking_config_from_openai(request_data)
-    native_thinking_config = build_native_thinking_config(model_id, request_data.reasoning_effort)
+    native_thinking_config = build_native_thinking_config(
+        model_id, request_data.reasoning_effort, client_disabled=not thinking_config.enabled
+    )
     if native_thinking_config.enabled:
         # Native adaptive thinking supersedes fake tag injection for this request.
         thinking_config = ThinkingConfig(enabled=False, budget_tokens=None)
