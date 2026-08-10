@@ -27,6 +27,32 @@ environment:
   FIRST_TOKEN_TIMEOUT: "30"
 ```
 
+### Claude 5 系列支持原生 adaptive thinking
+
+`NATIVE_THINKING_SUPPORTED_MODELS` 增加 `claude-opus-5` 与 `claude-sonnet-5`。列表按**子串**匹配归一化后的 model id，故 `claude-opus-5` 亦覆盖后续小版本（如 `claude-opus-5.1`）。
+
+此前 Claude 5 不在列表内，只能走 `FAKE_REASONING`：往用户消息前置 `<thinking_mode>` 标签让模型把思考写进正文，再由 `ThinkingParser` 解析回 `thinking_delta`。这条路的思考 token 是**实打实生成的**，没有加速通道，且必须整篇吐完才轮到答案。
+
+生效条件三者缺一不可：
+
+1. `KIRO_NATIVE_THINKING_MODE` 设为 `auto` 或 `force`（默认 `off`，整套原生逻辑休眠）
+2. 模型命中 `NATIVE_THINKING_SUPPORTED_MODELS`
+3. `auto` 模式下客户端须发 `thinking={"type":"adaptive","effort":...}`；发 `budget_tokens` 会映射成 `effort=None` 而回落假思考
+
+**Claude Code / LiteLLM 发的是 `budget_tokens`，因此实际流量只有 `force` 模式才切得到原生路径。**
+
+2026-08-10 在 account-8 实测确认：原生字段 `thinking` / `output_config` 在**旧 endpoint `q.us-east-1.amazonaws.com` 上同样可用**，Kiro 侧无 `ValidationException`，无标签泄漏。故本改动不依赖切换 endpoint。
+
+附带效果：走原生路径时 `inject_thinking_tags()` 不被调用，`Client requested thinking budget N exceeds cap` 警告随之消失。仅下调 `FAKE_REASONING_MAX_TOKENS` 只能消掉「客户端未指定 budget」那一条来路的警告，客户端自带 `budget_tokens` 或 `effort=max` 换算出的超额值仍会触发。
+
+### fix: force 模式不再覆盖客户端显式关闭思考
+
+`thinking={"type":"disabled"}` 映射成 `effort=None`，与「客户端未指定 effort」走同一分支，被 `force` 模式兜底成 `"high"` —— 显式关闭反而被打开。`build_native_thinking_config()` 增加 `client_disabled` 参数，opt-out 在任何模式下优先。
+
+### fix: 假思考说明文字跟随本次请求状态
+
+`get_thinking_system_prompt_addition()` 原本只按全局 `FAKE_REASONING_ENABLED` 判断，导致原生思考接管（或客户端关闭思考）时，system prompt 里仍插入「把推理包在 `<thinking>` 标签里」的说明 —— 模型会同时产出原生思考和假标签，而后者已无人解析。改为仅在本次请求真的注入假标签时才添加。
+
 ### CI / 镜像发布策略
 
 - `.github/workflows/docker.yml` 拆分为测试、Docker 镜像验证与 release 发布三个阶段。
