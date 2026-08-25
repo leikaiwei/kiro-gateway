@@ -45,7 +45,7 @@ from typing import Dict, List, Optional
 import httpx
 from loguru import logger
 
-from kiro.auth import KiroAuthManager, AuthType
+from kiro.auth import KiroAuthManager
 from kiro.cache import ModelInfoCache
 from kiro.model_resolver import ModelResolver, normalize_model_name
 from kiro.config import (
@@ -504,10 +504,11 @@ class AccountManager:
                 logger.debug(f"Account {account_id}: Using static model list for runtime.kiro.dev endpoint")
                 models_list = FALLBACK_MODELS
             else:
-                # Old endpoint - attempt to fetch dynamic model list
-                # Fetch models list with retry + fallback
+                # Old endpoint - attempt to fetch dynamic model list.
+                # Pass profileArn whenever the account has one: enterprise SSO OIDC
+                # accounts need it for ListAvailableModels to resolve their entitlements.
                 params = {"origin": "AI_EDITOR"}
-                if auth_manager.auth_type == AuthType.KIRO_DESKTOP and auth_manager.profile_arn:
+                if auth_manager.profile_arn:
                     params["profileArn"] = auth_manager.profile_arn
                 
                 list_models_url = f"{auth_manager.q_host}/ListAvailableModels"
@@ -604,8 +605,10 @@ class AccountManager:
         http_client = KiroHttpClient(account.auth_manager, shared_client=None)
         
         try:
+            # Pass profileArn whenever the account has one: enterprise SSO OIDC
+            # accounts need it for ListAvailableModels to resolve their entitlements.
             params = {"origin": "AI_EDITOR"}
-            if account.auth_manager.auth_type == AuthType.KIRO_DESKTOP and account.auth_manager.profile_arn:
+            if account.auth_manager.profile_arn:
                 params["profileArn"] = account.auth_manager.profile_arn
             
             list_models_url = f"{account.auth_manager.q_host}/ListAvailableModels"
