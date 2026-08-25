@@ -10,13 +10,23 @@
 
 ### Endpoint 兼容性
 
-上游将 API endpoint 从 `q.{region}.amazonaws.com` 迁移至 `runtime.{region}.kiro.dev`，但新 endpoint 对 SSO OIDC 账号返回 403。本 fork 还原了 `Content-Type` header 和 `profileArn` 处理逻辑，并支持通过环境变量覆盖 endpoint：
+上游将 API endpoint 从 `q.{region}.amazonaws.com` 迁移至 `runtime.{region}.kiro.dev`，但新 endpoint 对 SSO OIDC 账号返回 403。本 fork 还原了 `Content-Type` header，并支持通过环境变量覆盖 endpoint：
 
 ```yaml
 environment:
   KIRO_API_HOST_TEMPLATE: "https://q.{region}.amazonaws.com"
   KIRO_Q_HOST_TEMPLATE: "https://q.{region}.amazonaws.com"
 ```
+
+### profileArn 按账号是否具备来发，不按 auth 类型
+
+请求 payload 与 `ListAvailableModels` 的 `profileArn` 改为**只要 `auth_manager.profile_arn` 有值就发**，不再限定 `auth_type == KIRO_DESKTOP`。
+
+此前本 fork 曾反向修过一次（仅 Desktop 才发），当时把 403 归因为「SSO OIDC 发 profileArn 导致」。该结论不成立：走 SSO OIDC 的账号分两类，个人 Builder ID 本身没有 profileArn（取值为空，发不发都一样），而**企业 SSO 账号带 profileArn，上游要靠它识别订阅实体，不发才会 403**。按 auth 类型判断会把企业账号的 profileArn 一并丢掉。
+
+判空即可覆盖两类账号，无需再分支：`converters_core.build_kiro_payload()` 本就对空值跳过该字段。
+
+同时去掉了 `or PROFILE_ARN` 环境变量兜底 —— 该变量已在 `main.py` 的 `_add_env_overrides()` 里注入 `credentials.json`，再经 `KiroAuthManager` 归一到 `profile_arn`，在路由层重复兜底属冗余（且仅在 `credentials.json` 首次迁移时生效，多账号部署下本就不走这条路）。
 
 ### 首个 token 超时默认值
 
@@ -41,7 +51,7 @@ environment:
 
 **Claude Code / LiteLLM 发的是 `budget_tokens`，因此实际流量只有 `force` 模式才切得到原生路径。**
 
-2026-08-10 在 account-8 实测确认：原生字段 `thinking` / `output_config` 在**旧 endpoint `q.us-east-1.amazonaws.com` 上同样可用**，Kiro 侧无 `ValidationException`，无标签泄漏。故本改动不依赖切换 endpoint。
+2026-08-10 实测确认：原生字段 `thinking` / `output_config` 在**旧 endpoint `q.us-east-1.amazonaws.com` 上同样可用**，Kiro 侧无 `ValidationException`，无标签泄漏。故本改动不依赖切换 endpoint。
 
 附带效果：走原生路径时 `inject_thinking_tags()` 不被调用，`Client requested thinking budget N exceeds cap` 警告随之消失。仅下调 `FAKE_REASONING_MAX_TOKENS` 只能消掉「客户端未指定 budget」那一条来路的警告，客户端自带 `budget_tokens` 或 `effort=max` 换算出的超额值仍会触发。
 
