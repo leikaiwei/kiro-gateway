@@ -83,6 +83,29 @@ OpenAI 的 `usage.credits_used` 由 `EXPOSE_CREDITS_USED` 控制，**默认关**
 
 副作用只有一处：OpenAI 路径截断检测的 `received_usage` 恢复生效（原本 `received_usage or received_context_usage` 是两条腿，一直只有 `context_usage` 单腿承重），判定会略微变宽松。Anthropic 路径压根不看 metering，不受影响。上线后需盯 `Content truncated by Kiro API` 日志：减少是预期的（少了误判），**归零则要查是否漏判真截断**。
 
+### fix(anthropic): 网关自产的 WebSearch 内容块自己不收，触发一次会话即永久 422
+
+上游同款问题，已在 [PR #259](https://github.com/jwadow/kiro-gateway/pull/259)（server tool 块）与 [PR #163](https://github.com/jwadow/kiro-gateway/pull/163)（document 块）待合入，本 fork 先行取用。
+
+`ContentBlock` 这个 Union 只认六种块，而网关自己会往客户端吐 `server_tool_use` / `web_search_tool_result` / `web_search_result` —— Path A（`mcp_tools.py`）和 Path B（`streaming_anthropic.py` 流中途拦截 `web_search` 工具调用）**两条路都吐**。客户端按 Anthropic 协议把这些块留在消息历史里，下一轮原样回传，Pydantic 在进业务逻辑之前就 422。结果块一进历史就不会消失，**该会话此后每一轮都 422，直到用户新开会话**。`model_config = {"extra": "allow"}` 救不了，它只对顶层字段宽松，Union 成员匹配照样严格。
+
+生产 8 天日志（181，16 容器）实测 150 条 422：121 条因 `server_tool_use`（102 条同时含结果块），29 条因 `document` 块（PDF / 文本附件）。被拒的 id 形如 `srvtoolu_<32hex>`，正是 `mcp_tools.py` 自己生成的格式。**产生方是 Path B 而非 Path A**：121 条里 74 条在 `server_tool_use` 之前有 `thinking` 块、47 条有模型自述 text，而 Path A 的 SSE 序列固定为 `server_tool_use → web_search_tool_result → summary text`，不可能带这种前缀。同期 Path A 被调用 460 次，抽出的 query 长度中位 68、最长 163 字符，全部是单轮纯搜索请求，工作正常。
+
+三处改动：
+
+1. **`models_anthropic.py`** —— Union 补 `ServerToolUseContentBlock`、`WebSearchToolResultContentBlock`（含 `web_search_tool_result_error` 分支）、`DocumentContentBlock`。校验并未整体放宽，缺 `text` 的畸形 text 块仍然被拒。
+2. **`converters_anthropic.py`** —— `server_tool_use` 计入 tool_calls，`web_search_tool_result` 转成挂到紧随其后 user 消息上的 tool_result（复用 `generate_search_summary` 渲染）。走 tool_result 而不是拼进正文，是为了保住 `build_kiro_history()` 依赖的 tool_use/tool_result 配对；对话以 assistant 结尾时补一条 user 消息承接，避免结果被丢。document 块则在 `convert_anthropic_content_to_text()` 里摊平：`source.type == "text"` 原样内联，二进制来源（PDF 等）只留 `[Document: 名字 (media_type) — content not available to the model]` 占位。
+
+   > **PDF 不做文本解析是有意取舍。** 上游 PR #163 手写了约 90 行正则 + zlib 的 PDF 抽取器，对 372KB 的真实文档既不可靠又会把二进制噪声灌进 prompt。占位符已让模型知道有附件而不再 422，需要内容时客户端本就会另发工具读取。
+
+3. **`routes_anthropic.py`** —— Path A 的 early return 加守卫。只补模型是不够的：请求放行后依然会无条件 early return，而 `extract_query_from_messages()` 只看 `messages[0]`（其注释自陈 `LIMITATION: single-turn`），在多轮回放里会拿第一条用户消息当搜索词重搜一遍，模型永远轮不到回答 —— 422 变成答非所问，一样是坏的。`has_replayed_server_search()` 检测到历史里已有服务端搜索块就跳过 Path A，走正常推理。
+
+   配套：跳过 Path A 时须一并剥掉那个 native `web_search` 工具。它没有 `input_schema`，转换时 `inputSchema.json` 被兜底成 `{}`，模型调用它带不出 `query`，Path B 拦截会因缺 query 静默空转 —— 搜索能力会无声失效。剥掉后由 Path B 的自动注入换成带 `query` schema 的可用定义，搜索由 Path B 承接，行为连贯。
+
+**未采纳** PR #259 的 `streaming_anthropic.py` 部分（+319 行、5 轮上限的内部续写循环）：它解决的是上游 issue #258「Path B 搜完直接结束、模型来不及综述」的体验问题，不是 422，风险与收益不匹配。
+
+Path A 守卫上游无人做过，值得单独回一个 PR。
+
 ### CI / 镜像发布策略
 
 - `.github/workflows/docker.yml` 拆分为测试、Docker 镜像验证与 release 发布三个阶段。
