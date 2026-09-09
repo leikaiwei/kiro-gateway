@@ -63,6 +63,26 @@ environment:
 
 `get_thinking_system_prompt_addition()` 原本只按全局 `FAKE_REASONING_ENABLED` 判断，导致原生思考接管（或客户端关闭思考）时，system prompt 里仍插入「把推理包在 `<thinking>` 标签里」的说明 —— 模型会同时产出原生思考和假标签，而后者已无人解析。改为仅在本次请求真的注入假标签时才添加。
 
+### fix(parsers): 上游计费事件从未被匹配，credit 一直丢失
+
+已提上游 [PR #280](https://github.com/jwadow/kiro-gateway/pull/280)，合入后本节可删。
+
+`EVENT_PATTERNS` 里的模式是 `{"usage":`，而上游真实的计费事件形如 `{"unit":"credit","unitPlural":"credits","usage":<float>}` —— `usage` 是第三个键，`buffer.find('{"usage":')` 永远撞不上。于是 `metering_data` 恒为 `None`，`streaming_openai.py` 里那句 `credits_used` 输出从未生效，Anthropic 路径也拿不到 credit（#135 加的 cache usage 透传同样卡在这条模式上，一直是死代码）。
+
+`git log -S'"unit":' -- kiro/` 在全部提交里零命中 —— 不是有意丢弃，是照 AWS SDK 的字段名（`MeteringEvent { usage, unit }`）猜 wire 形态猜错了，`unit` 序列化时排在前面。
+
+新增独立的 `metering` 事件类型，不复用 `usage`：前者是 float 的 credit，后者是 cache token 的 dict，复用会在上游哪天真发 `{"usage":{...}}` 时互相覆盖。模式只取 `{"unit":`，unit 值的校验放在 `_process_metering_event` 里 —— 写成 `{"unit":"credit"` 的话，上游 JSON 多一个空格就静默失效。
+
+**credit 必须累加**：一个下游请求可能触发多次上游调用（工具调用），实测同一个 `/v1/messages` 的上游流里有两个计费事件 `0.0930 + 0.5290`，取最后一个少算 15%。两个 API、流式与非流式四条路都覆盖。
+
+每个请求记一行 `[Credit] req=<id> model=<model> credits=<float> calls=<n>`，`req=` 是外部按日志对账时的去重键。
+
+OpenAI 的 `usage.credits_used` 由 `EXPOSE_CREDITS_USED` 控制，**默认关**：生产流量全走 `/v1/messages`，OpenAI 端点零流量，不值得让 bug 修复顺带改变对外 payload 契约。Anthropic 路径只累加与记日志，payload 一个字节不改。
+
+> **别把这个字段改名叫 `cost`。** credit 不是钱（加购价 $0.04/credit），而 LiteLLM 的 `Usage` 有一个显式的 `cost: float | None` 字段会被当成真实费用采纳，改名等于直接污染下游计费与 spend 记账。
+
+副作用只有一处：OpenAI 路径截断检测的 `received_usage` 恢复生效（原本 `received_usage or received_context_usage` 是两条腿，一直只有 `context_usage` 单腿承重），判定会略微变宽松。Anthropic 路径压根不看 metering，不受影响。上线后需盯 `Content truncated by Kiro API` 日志：减少是预期的（少了误判），**归零则要查是否漏判真截断**。
+
 ### CI / 镜像发布策略
 
 - `.github/workflows/docker.yml` 拆分为测试、Docker 镜像验证与 release 发布三个阶段。
