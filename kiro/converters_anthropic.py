@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from kiro.config import HIDDEN_MODELS
+from kiro.mcp_tools import generate_search_summary
 from kiro.model_resolver import get_model_id_for_kiro
 from kiro.models_anthropic import (
     AnthropicMessagesRequest,
@@ -55,6 +56,9 @@ def convert_anthropic_content_to_text(content: Any) -> str:
     - String: "Hello, world!"
     - List of content blocks: [{"type": "text", "text": "Hello"}]
 
+    Document blocks are flattened into the text as well, since Kiro has no
+    document input field and dropping them would hide attached files entirely.
+
     Args:
         content: Anthropic message content
 
@@ -68,13 +72,65 @@ def convert_anthropic_content_to_text(content: Any) -> str:
         text_parts = []
         for block in content:
             if isinstance(block, dict):
-                if block.get("type") == "text":
+                block_type = block.get("type")
+            elif hasattr(block, "type"):
+                block_type = block.type
+            else:
+                continue
+
+            if block_type == "text":
+                if isinstance(block, dict):
                     text_parts.append(block.get("text", ""))
-            elif hasattr(block, "type") and block.type == "text":
-                text_parts.append(block.text)
+                else:
+                    text_parts.append(block.text)
+            elif block_type == "document":
+                document_text = convert_document_block_to_text(block)
+                if document_text:
+                    text_parts.append(document_text)
         return "".join(text_parts)
 
     return str(content) if content else ""
+
+
+def convert_document_block_to_text(block: Any) -> str:
+    """
+    Renders an Anthropic document block as prompt text.
+
+    Kiro accepts no document input, so a text source is inlined verbatim and
+    any binary source (PDF and friends) degrades to a labelled placeholder —
+    the model still learns a file is attached instead of seeing nothing.
+
+    Args:
+        block: A content block with type "document"
+
+    Returns:
+        Text representation, or "" when the block carries nothing usable
+    """
+    if isinstance(block, dict):
+        source = block.get("source")
+        title = block.get("title")
+    else:
+        source = getattr(block, "source", None)
+        title = getattr(block, "title", None)
+
+    if isinstance(source, dict):
+        source_type = source.get("type", "")
+        media_type = source.get("media_type", "")
+        data = source.get("data", "")
+    else:
+        source_type = getattr(source, "type", "") or ""
+        media_type = getattr(source, "media_type", "") or ""
+        data = getattr(source, "data", "") or ""
+
+    label = f"Document: {title}" if title else "Document"
+
+    if source_type == "text" and data:
+        return f"\n\n[{label}]\n{data}\n"
+
+    # 二进制来源（PDF 等）不解析，只留占位说明，避免把二进制噪声塞进 prompt
+    detail = f" ({media_type})" if media_type else ""
+    logger.debug(f"Document block not inlined (source_type={source_type}, media_type={media_type})")
+    return f"\n\n[{label}{detail} — content not available to the model]\n"
 
 
 def extract_system_prompt(system: Any) -> str:
@@ -206,11 +262,99 @@ def extract_images_from_tool_results(content: Any) -> List[Dict[str, Any]]:
     return tool_results
 
 
+def extract_server_web_search_results_from_anthropic_content(
+    content: Any,
+) -> List[Dict[str, Any]]:
+    """
+    Converts replayed Anthropic server WebSearch blocks to unified tool results.
+
+    The gateway emits server_tool_use + web_search_tool_result itself when it
+    intercepts a search, so clients hand them back on the next turn. Rendering
+    them as a normal tool_result keeps the tool_use/tool_result pairing that
+    build_kiro_history() relies on, and lets the model see what it found.
+
+    Args:
+        content: Anthropic assistant message content
+
+    Returns:
+        List of tool results in unified format
+    """
+    if not isinstance(content, list):
+        return []
+
+    # 先收集 server_tool_use 的 query，供结果块拼摘要用
+    search_queries: Dict[str, str] = {}
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            tool_id = block.get("id")
+            tool_name = block.get("name")
+            tool_input = block.get("input", {})
+        else:
+            block_type = getattr(block, "type", None)
+            tool_id = getattr(block, "id", None)
+            tool_name = getattr(block, "name", None)
+            tool_input = getattr(block, "input", {})
+
+        if block_type == "server_tool_use" and tool_name == "web_search" and tool_id:
+            search_queries[tool_id] = (
+                tool_input.get("query", "") if isinstance(tool_input, dict) else ""
+            )
+
+    tool_results = []
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            tool_use_id = block.get("tool_use_id")
+            result_content = block.get("content")
+        else:
+            block_type = getattr(block, "type", None)
+            tool_use_id = getattr(block, "tool_use_id", None)
+            result_content = getattr(block, "content", None)
+
+        if block_type != "web_search_tool_result" or not tool_use_id:
+            continue
+
+        if isinstance(result_content, list):
+            search_results = []
+            for item in result_content:
+                if isinstance(item, dict):
+                    search_results.append({
+                        "title": item.get("title", ""),
+                        "url": item.get("url", ""),
+                        "snippet": item.get("encrypted_content", ""),
+                    })
+                else:
+                    search_results.append({
+                        "title": getattr(item, "title", ""),
+                        "url": getattr(item, "url", ""),
+                        "snippet": getattr(item, "encrypted_content", ""),
+                    })
+            result_text = generate_search_summary(
+                search_queries.get(tool_use_id, ""),
+                {"results": search_results},
+            )
+        else:
+            if isinstance(result_content, dict):
+                error_code = result_content.get("error_code", "unknown")
+            else:
+                error_code = getattr(result_content, "error_code", "unknown")
+            result_text = f"Web search failed: {error_code}"
+
+        tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": result_text,
+        })
+
+    return tool_results
+
+
 def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any]]:
     """
     Extracts tool uses from Anthropic assistant message content.
 
-    Looks for content blocks with type="tool_use".
+    Looks for content blocks with type="tool_use" or "server_tool_use".
 
     Args:
         content: Anthropic message content (list of content blocks)
@@ -240,7 +384,7 @@ def extract_tool_uses_from_anthropic_content(content: Any) -> List[Dict[str, Any
             tool_name = getattr(block, "name", None)
             tool_input = getattr(block, "input", {})
 
-        if block_type == "tool_use" and tool_id and tool_name:
+        if block_type in ("tool_use", "server_tool_use") and tool_id and tool_name:
             tool_calls.append(
                 {
                     "id": tool_id,
@@ -279,6 +423,8 @@ def convert_anthropic_messages(
     total_tool_calls = 0
     total_tool_results = 0
     total_images = 0
+    # 服务端搜索结果块在 assistant 消息里，需挪到紧随其后的 user 消息作为 tool_result
+    pending_server_tool_results: List[Dict[str, Any]] = []
 
     for msg in messages:
         role = msg.role
@@ -298,9 +444,18 @@ def convert_anthropic_messages(
             if tool_calls:
                 total_tool_calls += len(tool_calls)
 
+            server_tool_results = (
+                extract_server_web_search_results_from_anthropic_content(content)
+            )
+            if server_tool_results:
+                pending_server_tool_results.extend(server_tool_results)
+
         elif role == "user":
             # User messages may contain tool_result blocks and images
             tool_results = extract_tool_results_from_anthropic_content(content)
+            if pending_server_tool_results:
+                tool_results = pending_server_tool_results + tool_results
+                pending_server_tool_results = []
             if tool_results:
                 total_tool_results += len(tool_results)
 
@@ -327,6 +482,15 @@ def convert_anthropic_messages(
             images=images if images else None,
         )
         unified_messages.append(unified_msg)
+
+    # 对话以 assistant 的搜索结果结尾时，补一条 user 消息承接，避免结果被丢掉
+    if pending_server_tool_results:
+        unified_messages.append(UnifiedMessage(
+            role="user",
+            content="",
+            tool_results=pending_server_tool_results,
+        ))
+        total_tool_results += len(pending_server_tool_results)
 
     # Log summary if any tool content or images were found
     if total_tool_calls > 0 or total_tool_results > 0 or total_images > 0:

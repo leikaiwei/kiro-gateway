@@ -70,6 +70,34 @@ anthropic_api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 auth_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
+def has_replayed_server_search(messages) -> bool:
+    """
+    Reports whether the conversation already carries server-side search blocks.
+
+    Their presence means the gateway has run a search in an earlier turn and the
+    client is handing the result back, so the request is a continuation rather
+    than a fresh single-turn search.
+
+    Args:
+        messages: Anthropic messages from the request
+
+    Returns:
+        True when a server_tool_use or web_search_tool_result block is present
+    """
+    for msg in messages or []:
+        content = getattr(msg, "content", None)
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            block_type = (
+                block.get("type") if isinstance(block, dict)
+                else getattr(block, "type", None)
+            )
+            if block_type in ("server_tool_use", "web_search_tool_result"):
+                return True
+    return False
+
+
 async def verify_anthropic_api_key(
     x_api_key: Optional[str] = Security(anthropic_api_key_header),
     authorization: Optional[str] = Security(auth_header)
@@ -252,6 +280,19 @@ async def messages(
     # WebSearch Support - Path B: Auto-Injection (MCP Tool Emulation)
     # ==============================================================================
     
+    # 客户端回放服务端搜索历史时 Path A 会被跳过（见下方守卫）。那个 native web_search
+    # 工具没有 input_schema，模型调用它带不出 query，Path B 拦截会因缺 query 空转 ——
+    # 先剥掉，交给下面的自动注入换成带 query schema 的可用定义。
+    replayed_server_search = has_replayed_server_search(request_data.messages)
+    if replayed_server_search and request_data.tools:
+        kept_tools = [
+            tool for tool in request_data.tools
+            if not (getattr(tool, "type", None) and getattr(tool, "name", "") == "web_search")
+        ]
+        if len(kept_tools) != len(request_data.tools):
+            request_data.tools = kept_tools
+            logger.info("Replayed server web_search history, dropped native web_search tool")
+
     # Auto-inject web_search tool if enabled (Path B - MCP emulation)
     if WEB_SEARCH_ENABLED:
         if request_data.tools is None:
@@ -285,7 +326,11 @@ async def messages(
     
     # Check for native Anthropic server-side tool (Path A)
     # This works ALWAYS, regardless of WEB_SEARCH_ENABLED setting
-    if request_data.tools:
+    #
+    # Skipped when the client replays earlier server-search blocks: Path A extracts
+    # its query from messages[0] only, so on a replayed conversation it would search
+    # the opening message again instead of letting the model answer.
+    if request_data.tools and not replayed_server_search:
         for tool in request_data.tools:
             tool_type = getattr(tool, "type", None)
             if tool_type and tool_type.startswith("web_search"):

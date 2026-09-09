@@ -22,6 +22,9 @@ from kiro.models_anthropic import (
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    ServerToolUseContentBlock,
+    WebSearchToolResultContentBlock,
+    DocumentContentBlock,
     # Image models
     Base64ImageSource,
     URLImageSource,
@@ -1792,3 +1795,170 @@ class TestThinkingParameter:
         print(f"Comparing thinking: got={request.thinking}")
         assert request.thinking is not None
         assert request.thinking["type"] == "disabled"
+
+
+# ==================================================================================================
+# Tests for server-side tool and document content blocks
+#
+# Regression coverage for the 422 storm observed in production: the gateway emits
+# server_tool_use / web_search_tool_result itself, clients replay them on the next
+# turn, and the ContentBlock union used to reject its own output. Payload shapes
+# below are taken from real rejected requests.
+# ==================================================================================================
+
+class TestServerToolUseContentBlock:
+    """Tests for ServerToolUseContentBlock Pydantic model."""
+
+    def test_valid_server_tool_use_block(self):
+        """
+        What it does: Verifies creation of valid ServerToolUseContentBlock.
+        Purpose: Ensure the gateway accepts back the block shape it emits itself.
+        """
+        print("Setup: Creating ServerToolUseContentBlock with valid data...")
+        block = ServerToolUseContentBlock(
+            id="srvtoolu_25a23f3f4c9349288f6efd437fd38c56",
+            name="web_search",
+            input={"query": "kiro gateway"},
+        )
+
+        print(f"Comparing type: Expected 'server_tool_use', Got '{block.type}'")
+        assert block.type == "server_tool_use"
+        assert block.input["query"] == "kiro gateway"
+
+    def test_allows_extra_fields(self):
+        """
+        What it does: Verifies extra fields are allowed.
+        Purpose: Ensure forward compatibility with future Anthropic fields.
+        """
+        print("Setup: Creating ServerToolUseContentBlock with cache_control...")
+        block = ServerToolUseContentBlock(
+            id="srvtoolu_1",
+            name="web_search",
+            input={},
+            cache_control={"type": "ephemeral"},
+        )
+
+        assert block.name == "web_search"
+
+
+class TestWebSearchToolResultContentBlock:
+    """Tests for WebSearchToolResultContentBlock Pydantic model."""
+
+    def test_accepts_result_list(self):
+        """
+        What it does: Verifies a successful web search result parses.
+        Purpose: Ensure replayed search results are accepted.
+        """
+        print("Setup: Creating WebSearchToolResultContentBlock with results...")
+        block = WebSearchToolResultContentBlock(
+            tool_use_id="srvtoolu_1",
+            content=[
+                {
+                    "type": "web_search_result",
+                    "title": "Example",
+                    "url": "https://example.com",
+                    "encrypted_content": "summary text",
+                    "page_age": None,
+                }
+            ],
+        )
+
+        print(f"Comparing type: Expected 'web_search_tool_result', Got '{block.type}'")
+        assert block.type == "web_search_tool_result"
+        assert block.content[0].url == "https://example.com"
+
+    def test_accepts_error_content(self):
+        """
+        What it does: Verifies the error variant of a web search result parses.
+        Purpose: Ensure failed searches replay without a validation error.
+        """
+        print("Setup: Creating WebSearchToolResultContentBlock with error content...")
+        block = WebSearchToolResultContentBlock(
+            tool_use_id="srvtoolu_1",
+            content={"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
+        )
+
+        print(f"Comparing error_code: Got '{block.content.error_code}'")
+        assert block.content.error_code == "max_uses_exceeded"
+
+
+class TestDocumentContentBlock:
+    """Tests for DocumentContentBlock Pydantic model."""
+
+    def test_accepts_text_source(self):
+        """
+        What it does: Verifies a text/plain document block parses.
+        Purpose: Ensure attached text files no longer trigger 422.
+        """
+        print("Setup: Creating DocumentContentBlock with text source...")
+        block = DocumentContentBlock(
+            source={"type": "text", "media_type": "text/plain", "data": "secret-token"},
+            title="XIEYUMING-token-PRD-secret.txt",
+        )
+
+        print(f"Comparing type: Expected 'document', Got '{block.type}'")
+        assert block.type == "document"
+        assert block.source.data == "secret-token"
+
+    def test_accepts_base64_pdf_source_with_cache_control(self):
+        """
+        What it does: Verifies a base64 PDF document block parses.
+        Purpose: Ensure Claude Code PDF attachments no longer trigger 422.
+        """
+        print("Setup: Creating DocumentContentBlock with base64 PDF source...")
+        block = DocumentContentBlock(
+            source={"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjcN"},
+            cache_control={"type": "ephemeral"},
+        )
+
+        assert block.source.media_type == "application/pdf"
+
+
+class TestReplayedServerSearchMessage:
+    """Tests that whole replayed messages validate (the actual 422 shape)."""
+
+    def test_assistant_message_with_thinking_and_server_search(self):
+        """
+        What it does: Validates the exact message shape that produced 422 in production.
+        Purpose: Lock in the fix for gateway-emitted blocks replayed by the client.
+        """
+        print("Setup: Building assistant message replayed by Claude Code...")
+        msg = AnthropicMessage(
+            role="assistant",
+            content=[
+                {"type": "thinking", "thinking": "I'll rely on web search.", "signature": ""},
+                {
+                    "id": "srvtoolu_25a23f3f4c9349288f6efd437fd38c56",
+                    "type": "server_tool_use",
+                    "name": "web_search",
+                    "input": {"query": "kiro"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_25a23f3f4c9349288f6efd437fd38c56",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "title": "T",
+                            "url": "https://a",
+                            "encrypted_content": "snippet",
+                            "page_age": None,
+                        }
+                    ],
+                },
+            ],
+        )
+
+        types = [block.type for block in msg.content]
+        print(f"Comparing block types: Got {types}")
+        assert types == ["thinking", "server_tool_use", "web_search_tool_result"]
+
+    def test_malformed_text_block_still_rejected(self):
+        """
+        What it does: Verifies a text block missing 'text' still fails validation.
+        Purpose: Ensure the widened union did not loosen validation overall.
+        """
+        print("Setup: Attempting to validate a text block with no text field...")
+
+        with pytest.raises(ValidationError):
+            AnthropicMessage(role="user", content=[{"type": "text"}])

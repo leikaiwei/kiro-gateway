@@ -162,6 +162,97 @@ class ImageContentBlock(BaseModel):
     source: Union[Base64ImageSource, URLImageSource]
 
 
+# ==================================================================================================
+# Server-Side Tool Content Block Models
+# ==================================================================================================
+
+
+class ServerToolUseContentBlock(BaseModel):
+    """
+    Anthropic server-executed tool call returned in assistant history.
+
+    The gateway emits these itself when it intercepts a web_search call
+    (both Path A in mcp_tools.py and Path B in streaming_anthropic.py),
+    so clients replay them on the next turn and we must accept them back.
+    """
+
+    type: Literal["server_tool_use"] = "server_tool_use"
+    id: str
+    name: str
+    input: Dict[str, Any]
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchResultBlock(BaseModel):
+    """One result nested inside an Anthropic web-search tool result."""
+
+    type: Literal["web_search_result"] = "web_search_result"
+    title: str
+    url: str
+    encrypted_content: str
+    page_age: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchToolResultErrorContentBlock(BaseModel):
+    """Error returned by Anthropic-compatible server-side web search."""
+
+    type: Literal["web_search_tool_result_error"] = "web_search_tool_result_error"
+    error_code: str
+
+    model_config = {"extra": "allow"}
+
+
+class WebSearchToolResultContentBlock(BaseModel):
+    """Completed Anthropic web-search result returned in assistant history."""
+
+    type: Literal["web_search_tool_result"] = "web_search_tool_result"
+    tool_use_id: str
+    content: Union[List[WebSearchResultBlock], WebSearchToolResultErrorContentBlock]
+
+    model_config = {"extra": "allow"}
+
+
+# ==================================================================================================
+# Document Content Block Models
+# ==================================================================================================
+
+
+class DocumentSource(BaseModel):
+    """
+    Document source in Anthropic format.
+
+    Anthropic defines several source types ("text", "base64", "url", "file").
+    Kiro has no document input, so converters only need the payload fields;
+    the model stays permissive so unknown source types still validate.
+    """
+
+    type: str
+    media_type: Optional[str] = None
+    data: Optional[str] = None
+    url: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+class DocumentContentBlock(BaseModel):
+    """
+    Document content block in Anthropic format.
+
+    Claude Code sends these when a PDF or text file is attached to the
+    conversation. Kiro cannot ingest documents, so converters flatten them
+    into prompt text (see convert_anthropic_content_to_text).
+    """
+
+    type: Literal["document"] = "document"
+    source: DocumentSource
+    title: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
 # Union type for all content blocks (including images and thinking)
 ContentBlock = Union[
     TextContentBlock,
@@ -170,6 +261,9 @@ ContentBlock = Union[
     ToolUseContentBlock,
     ToolResultContentBlock,
     ToolReferenceContentBlock,
+    ServerToolUseContentBlock,
+    WebSearchToolResultContentBlock,
+    DocumentContentBlock,
 ]
 
 

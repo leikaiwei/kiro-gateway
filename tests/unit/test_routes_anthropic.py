@@ -2519,3 +2519,145 @@ class TestCountTokensEndpoint:
         assert data["input_tokens"] > 0
         
         print("✅ max_tokens is NOT required for count_tokens")
+
+# ==================================================================================================
+# Tests for the Path A replay guard
+# ==================================================================================================
+
+class TestHasReplayedServerSearch:
+    """Tests for has_replayed_server_search (Path A early-return guard)."""
+
+    def test_fresh_single_turn_search_is_not_a_replay(self):
+        """
+        What it does: Verifies a plain single-turn search request is not flagged.
+        Purpose: Keep Path A working for the dedicated WebSearch sub-request.
+        """
+        print("Setup: Building a single-turn search request...")
+        from kiro.routes_anthropic import has_replayed_server_search
+        from kiro.models_anthropic import AnthropicMessage
+
+        messages = [AnthropicMessage(role="user", content="Perform a web search for the query: kiro")]
+
+        print(f"Checking: Got {has_replayed_server_search(messages)}")
+        assert has_replayed_server_search(messages) is False
+
+    def test_replayed_server_tool_use_is_detected(self):
+        """
+        What it does: Verifies replayed server_tool_use blocks are detected.
+        Purpose: Stop Path A from re-searching messages[0] on a continued conversation.
+        """
+        print("Setup: Building a conversation replaying a gateway search...")
+        from kiro.routes_anthropic import has_replayed_server_search
+        from kiro.models_anthropic import AnthropicMessage
+
+        messages = [
+            AnthropicMessage(role="user", content="查一下 kiro"),
+            AnthropicMessage(role="assistant", content=[
+                {"type": "text", "text": "I'll search."},
+                {"id": "srvtoolu_1", "type": "server_tool_use", "name": "web_search", "input": {}},
+                {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []},
+            ]),
+            AnthropicMessage(role="user", content="继续"),
+        ]
+
+        print(f"Checking: Got {has_replayed_server_search(messages)}")
+        assert has_replayed_server_search(messages) is True
+
+    def test_ordinary_tool_history_is_not_a_replay(self):
+        """
+        What it does: Verifies normal tool_use/tool_result history is not flagged.
+        Purpose: Ensure the guard only reacts to server-side search blocks.
+        """
+        print("Setup: Building a conversation with ordinary client tools...")
+        from kiro.routes_anthropic import has_replayed_server_search
+        from kiro.models_anthropic import AnthropicMessage
+
+        messages = [
+            AnthropicMessage(role="assistant", content=[
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"path": "a.py"}},
+            ]),
+            AnthropicMessage(role="user", content=[
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+            ]),
+        ]
+
+        print(f"Checking: Got {has_replayed_server_search(messages)}")
+        assert has_replayed_server_search(messages) is False
+
+    def test_string_content_and_empty_history_are_safe(self):
+        """
+        What it does: Verifies string content and empty message lists do not crash.
+        Purpose: Guard runs on every request, so it must tolerate any shape.
+        """
+        print("Setup: Checking string content and empty history...")
+        from kiro.routes_anthropic import has_replayed_server_search
+        from kiro.models_anthropic import AnthropicMessage
+
+        assert has_replayed_server_search([]) is False
+        assert has_replayed_server_search(None) is False
+        assert has_replayed_server_search([AnthropicMessage(role="user", content="hi")]) is False
+
+
+class TestPathAReplayGuardRouting:
+    """End-to-end routing tests for the Path A replay guard."""
+
+    NATIVE_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 8}
+
+    REPLAYED_HISTORY = [
+        {"role": "user", "content": "查一下 kiro"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": "I'll search without narrating."},
+            {"id": "srvtoolu_1", "type": "server_tool_use", "name": "web_search", "input": {"query": "kiro"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                {"type": "web_search_result", "title": "T", "url": "https://u",
+                 "encrypted_content": "S", "page_age": None},
+            ]},
+        ]},
+        {"role": "user", "content": "继续"},
+    ]
+
+    def test_fresh_search_still_routes_to_path_a(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies a single-turn search request still hits Path A.
+        Purpose: Ensure the guard did not break Claude Code's WebSearch sub-request.
+        """
+        print("Setup: Patching handle_native_web_search...")
+        from fastapi.responses import JSONResponse
+
+        with patch("kiro.routes_anthropic.handle_native_web_search", new_callable=AsyncMock) as mock_native:
+            mock_native.return_value = JSONResponse(status_code=200, content={"ok": True})
+            test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-opus-5",
+                    "max_tokens": 1024,
+                    "messages": [{"role": "user", "content": "Perform a web search for the query: kiro"}],
+                    "tools": [self.NATIVE_TOOL],
+                },
+            )
+
+        print(f"Checking: handle_native_web_search called={mock_native.called}")
+        assert mock_native.called is True
+
+    def test_replayed_conversation_skips_path_a(self, test_client, valid_proxy_api_key):
+        """
+        What it does: Verifies a replayed conversation does not hit Path A.
+        Purpose: Stop the gateway from re-searching messages[0] instead of answering.
+        """
+        print("Setup: Posting a conversation that replays gateway search blocks...")
+        with patch("kiro.routes_anthropic.handle_native_web_search", new_callable=AsyncMock) as mock_native:
+            response = test_client.post(
+                "/v1/messages",
+                headers={"x-api-key": valid_proxy_api_key},
+                json={
+                    "model": "claude-opus-5",
+                    "max_tokens": 1024,
+                    "messages": self.REPLAYED_HISTORY,
+                    "tools": [self.NATIVE_TOOL],
+                },
+            )
+
+        print(f"Checking: status={response.status_code}, native_called={mock_native.called}")
+        assert response.status_code != 422, "replayed server search blocks must not fail validation"
+        assert mock_native.called is False

@@ -21,6 +21,7 @@ from kiro.converters_anthropic import (
     extract_tool_results_from_anthropic_content,
     extract_images_from_tool_results,
     extract_tool_uses_from_anthropic_content,
+    extract_server_web_search_results_from_anthropic_content,
     convert_anthropic_messages,
     convert_anthropic_tools,
     anthropic_to_kiro,
@@ -2083,3 +2084,168 @@ class TestAnthropicToKiroIntegration:
         assert payload["output_config"] == {"effort": "high"}
         content = payload["conversationState"]["currentMessage"]["userInputMessage"]["content"]
         assert "<thinking_mode>enabled</thinking_mode>" not in content
+
+
+# ==================================================================================================
+# Tests for replayed server-side WebSearch blocks and document blocks
+# ==================================================================================================
+
+class TestServerWebSearchReplay:
+    """Tests for converting gateway-emitted search blocks back into unified form."""
+
+    ASSISTANT_CONTENT = [
+        {"type": "text", "text": "I'll search without narrating."},
+        {
+            "id": "srvtoolu_25a23f3f4c9349288f6efd437fd38c56",
+            "type": "server_tool_use",
+            "name": "web_search",
+            "input": {"query": "kiro gateway 422"},
+        },
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_25a23f3f4c9349288f6efd437fd38c56",
+            "content": [
+                {
+                    "type": "web_search_result",
+                    "title": "Result title",
+                    "url": "https://example.com/a",
+                    "encrypted_content": "result snippet",
+                    "page_age": None,
+                }
+            ],
+        },
+    ]
+
+    def test_extracts_search_result_as_tool_result(self):
+        """
+        What it does: Verifies web_search_tool_result becomes a unified tool_result.
+        Purpose: Ensure replayed search results reach the model instead of being dropped.
+        """
+        print("Setup: Extracting server search results from assistant content...")
+        results = extract_server_web_search_results_from_anthropic_content(self.ASSISTANT_CONTENT)
+
+        print(f"Comparing count: Expected 1, Got {len(results)}")
+        assert len(results) == 1
+        assert results[0]["tool_use_id"] == "srvtoolu_25a23f3f4c9349288f6efd437fd38c56"
+        assert "Result title" in results[0]["content"]
+        assert "https://example.com/a" in results[0]["content"]
+        assert "kiro gateway 422" in results[0]["content"]
+
+    def test_extracts_search_error_as_tool_result(self):
+        """
+        What it does: Verifies the error variant renders as text.
+        Purpose: Ensure a failed search does not break history conversion.
+        """
+        print("Setup: Extracting a web_search_tool_result_error block...")
+        results = extract_server_web_search_results_from_anthropic_content([
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "srvtoolu_1",
+                "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"},
+            }
+        ])
+
+        print(f"Comparing content: Got '{results[0]['content']}'")
+        assert results[0]["content"] == "Web search failed: max_uses_exceeded"
+
+    def test_server_tool_use_becomes_tool_call(self):
+        """
+        What it does: Verifies server_tool_use is treated as a tool call.
+        Purpose: Keep the tool_use/tool_result pairing build_kiro_history relies on.
+        """
+        print("Setup: Extracting tool uses from assistant content...")
+        tool_calls = extract_tool_uses_from_anthropic_content(self.ASSISTANT_CONTENT)
+
+        print(f"Comparing count: Expected 1, Got {len(tool_calls)}")
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "web_search"
+
+    def test_search_result_moves_to_following_user_message(self):
+        """
+        What it does: Verifies search results attach to the next user message.
+        Purpose: Ensure conversion keeps Kiro's tool_use → tool_result ordering.
+        """
+        print("Setup: Converting assistant + user message pair...")
+        unified = convert_anthropic_messages([
+            AnthropicMessage(role="assistant", content=self.ASSISTANT_CONTENT),
+            AnthropicMessage(role="user", content="继续"),
+        ])
+
+        print(f"Comparing assistant tool_calls: Got {unified[0].tool_calls}")
+        assert unified[0].tool_calls[0]["id"] == "srvtoolu_25a23f3f4c9349288f6efd437fd38c56"
+        assert unified[0].content == "I'll search without narrating."
+
+        print(f"Comparing user tool_results count: Got {len(unified[1].tool_results)}")
+        assert len(unified[1].tool_results) == 1
+        assert "Result title" in unified[1].tool_results[0]["content"]
+
+    def test_trailing_search_result_gets_synthetic_user_message(self):
+        """
+        What it does: Verifies results survive when the conversation ends on assistant.
+        Purpose: Prevent silently dropping the search the model just performed.
+        """
+        print("Setup: Converting a conversation ending with the assistant search...")
+        unified = convert_anthropic_messages([
+            AnthropicMessage(role="user", content="搜一下"),
+            AnthropicMessage(role="assistant", content=self.ASSISTANT_CONTENT),
+        ])
+
+        print(f"Comparing message count: Expected 3, Got {len(unified)}")
+        assert len(unified) == 3
+        assert unified[2].role == "user"
+        assert len(unified[2].tool_results) == 1
+
+
+class TestDocumentBlockConversion:
+    """Tests for flattening Anthropic document blocks into prompt text."""
+
+    def test_text_document_is_inlined(self):
+        """
+        What it does: Verifies a text/plain document is inlined verbatim.
+        Purpose: Ensure attached text files reach the model.
+        """
+        print("Setup: Converting content with a text document block...")
+        text = convert_anthropic_content_to_text([
+            {
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": "PAT-VALUE"},
+                "title": "token.txt",
+            },
+            {"type": "text", "text": "用这个替换 PAT"},
+        ])
+
+        print(f"Comparing text: Got {text!r}")
+        assert "[Document: token.txt]" in text
+        assert "PAT-VALUE" in text
+        assert "用这个替换 PAT" in text
+
+    def test_binary_document_degrades_to_placeholder(self):
+        """
+        What it does: Verifies a base64 PDF renders as a labelled placeholder.
+        Purpose: Avoid pushing binary noise into the prompt while still signalling the file.
+        """
+        print("Setup: Converting content with a base64 PDF document block...")
+        text = convert_anthropic_content_to_text([
+            {
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0xLjcN"},
+                "title": "差旅管理办法.pdf",
+            }
+        ])
+
+        print(f"Comparing text: Got {text!r}")
+        assert "[Document: 差旅管理办法.pdf (application/pdf) — content not available to the model]" in text
+        assert "JVBERi0xLjcN" not in text
+
+    def test_untitled_document_still_labelled(self):
+        """
+        What it does: Verifies a document without a title still renders.
+        Purpose: Ensure the title field is optional.
+        """
+        print("Setup: Converting an untitled text document...")
+        text = convert_anthropic_content_to_text([
+            {"type": "document", "source": {"type": "text", "data": "body"}}
+        ])
+
+        assert "[Document]" in text
+        assert "body" in text
